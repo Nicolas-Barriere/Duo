@@ -29,12 +29,9 @@ async def ws_room(ws: WebSocket, room_id: str):
         await ws.close(code=1013, reason="Room full")
         return
     
-    is_first_person = len(room) == 0
     room.append(ws)
     
-    # Only notify when we have exactly 2 people
     if len(room) == 2:
-        # Tell both clients they can start WebRTC
         for client in room:
             try:
                 await client.send_json({"type": "system", "data": {"event": "start_call"}})
@@ -57,7 +54,6 @@ async def ws_room(ws: WebSocket, room_id: str):
     finally:
         if ws in room:
             room.remove(ws)
-        # Tell remaining person to reset
         for other_ws in room:
             try:
                 await other_ws.send_json({"type": "system", "data": {"event": "peer_left"}})
