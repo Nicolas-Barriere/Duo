@@ -4,9 +4,9 @@ import { useParams } from "next/navigation";
 
 // Messages échangés via WebSocket
 type Msg =
-  | { type: "system"; data: { event: "join"; clientId: string } }
-  | { type: "sdp"; data: (RTCSessionDescriptionInit & { from?: string }) }
-  | { type: "ice"; data: (RTCIceCandidateInit & { from?: string }) };
+  | { type: "system"; data: { event: "start_call" | "peer_left" } }
+  | { type: "sdp"; data: RTCSessionDescriptionInit }
+  | { type: "ice"; data: RTCIceCandidateInit };
 
 export default function Room() {
   const { id: roomId } = useParams<{ id: string }>();
@@ -27,9 +27,8 @@ export default function Room() {
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
 
-  // Identifiants peers
-  const myIdRef = useRef<string>(Math.random().toString(36).slice(2));
-  const otherIdRef = useRef<string | null>(null);
+  // État de connexion simple
+  const [hasPeer, setHasPeer] = useState(false);
   const offerMadeRef = useRef(false);
 
   // Statut
@@ -85,7 +84,10 @@ export default function Room() {
   // ---- Helpers ----
   const safeSend = (m: Msg) => {
     const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(m));
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      console.log("WS TX:", m.type, m.data);
+      ws.send(JSON.stringify(m));
+    }
   };
 
   const ensurePC = () => {
@@ -118,104 +120,114 @@ export default function Room() {
     }
 
     pc.ontrack = (ev) => {
+      console.log("Received remote track:", ev.track.kind, "ready state:", ev.track.readyState);
       const track = ev.track;
+      
+      // Mettre à jour le statut quand on reçoit de la vidéo
+      if (track.kind === "video") {
+        setStatus(s => s.includes("Vidéo reçue") ? s : s + " | Vidéo reçue");
+      }
       if (!remoteStreamRef.current) {
         remoteStreamRef.current = new MediaStream();
       }
-      if (!remoteStreamRef.current.getTracks().some(t => t.id === track.id)) {
+      // Nettoyer les anciennes pistes "ended" du même type avant d'ajouter la nouvelle
+      const existingTracks = remoteStreamRef.current.getTracks().filter(t => 
+        t.kind === track.kind && (t.readyState === "ended" || t.id === track.id)
+      );
+      existingTracks.forEach(t => {
+        remoteStreamRef.current!.removeTrack(t);
+      });
+      
+      // Ajouter la nouvelle piste live
+      if (track.readyState === "live") {
         remoteStreamRef.current.addTrack(track);
+        console.log(`Added ${track.kind} track:`, track.id, "state:", track.readyState);
       }
+      
+      // Mettre à jour le srcObject de la vidéo
       if (remoteVideoRef.current && remoteVideoRef.current.srcObject !== remoteStreamRef.current) {
         remoteVideoRef.current.srcObject = remoteStreamRef.current;
+        console.log("Remote video source updated");
       }
-      // Forcer lecture (certains navigateurs bloquent si pas déclenché)
-      setTimeout(() => { try { remoteVideoRef.current?.play().catch(() => {}); } catch {} }, 0);
+      
+      // Forcer lecture de la vidéo distante
+      if (remoteVideoRef.current) {
+        console.log("Forcing remote video play...");
+        remoteVideoRef.current.play().catch((e) => {
+          console.warn("Autoplay failed:", e);
+          // Essayer de déclencher la lecture avec un clic utilisateur simulé
+          const playVideo = () => {
+            if (remoteVideoRef.current) {
+              remoteVideoRef.current.play().catch(() => {});
+              document.removeEventListener('click', playVideo);
+            }
+          };
+          document.addEventListener('click', playVideo, { once: true });
+        });
+      }
+    };
+
+    pc.onconnectionstatechange = () => {
+      console.log("Connection state:", pc.connectionState);
+      if (pc.connectionState === "connected") {
+        setStatus("Connexion établie ✅");
+      }
     };
 
     pc.onicecandidate = (ev) => {
-      if (ev.candidate) safeSend({ type: "ice", data: { ...ev.candidate.toJSON(), from: myIdRef.current } });
+      if (ev.candidate) safeSend({ type: "ice", data: ev.candidate.toJSON() });
     };
 
     return pc;
   };
 
-  const tryCreateOffer = async () => {
-    if (!otherIdRef.current) return;
-    if (offerMadeRef.current) return;
-    if (myIdRef.current >= otherIdRef.current) return;
-    const pc = ensurePC();
-    try {
-      offerMadeRef.current = true;
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      safeSend({ type: "sdp", data: { ...offer, from: myIdRef.current } });
-      setStatus("Offre envoyée");
-    } catch (e) {
-      console.warn("Erreur création offre", e);
-    }
-  };
 
-  const lastRemoteSDPRef = useRef<string | null>(null);
-  const handleRemoteSDP = async (desc: RTCSessionDescriptionInit & { from?: string }) => {
-    if (desc.from && desc.from === myIdRef.current) return; // echo
-    // Si on reçoit une offre avant d'avoir la caméra, on la demande maintenant
-    if (desc.type === "offer" && !localStreamRef.current) {
-      try { await ensureLocalStream(); } catch {}
-    }
+
+
+
+  const handleRemoteSDP = async (desc: RTCSessionDescriptionInit) => {
     const pc = ensurePC();
     try {
-      if (desc.sdp && lastRemoteSDPRef.current === desc.sdp) return; // duplicate
-      if (desc.type === "offer" && pc.signalingState === "have-local-offer") {
-        try {
-          await pc.setLocalDescription({ type: "rollback" } as any);
-          offerMadeRef.current = false;
-          setStatus("Glare: rollback");
-        } catch {}
-      }
+      console.log("Received SDP:", desc.type);
       await pc.setRemoteDescription(desc);
-      lastRemoteSDPRef.current = desc.sdp || null;
       setStatus(desc.type === "offer" ? "Offre reçue" : "Réponse reçue");
-
-      // S'assurer que le remote video est attaché même si aucun ontrack (cas rare)
-      if (pc.getReceivers) {
-        const rTracks = pc.getReceivers().map(r => r.track).filter(Boolean) as MediaStreamTrack[];
-        if (rTracks.length) {
-          if (!remoteStreamRef.current) remoteStreamRef.current = new MediaStream();
-          rTracks.forEach(t => {
-            if (t && !remoteStreamRef.current!.getTracks().some(x => x.id === t.id)) {
-              remoteStreamRef.current!.addTrack(t);
-            }
-          });
-          if (remoteVideoRef.current && remoteVideoRef.current.srcObject !== remoteStreamRef.current) {
-            remoteVideoRef.current.srcObject = remoteStreamRef.current;
-            try { (remoteVideoRef.current as HTMLVideoElement).play().catch(() => {}); } catch {}
-          }
-        }
-      }
-
-      if (pc.remoteDescription) {
-        while (pendingIce.current.length) {
-          const c = pendingIce.current.shift();
-          if (!c) continue;
+      
+      // Process pending ICE candidates
+      while (pendingIce.current.length) {
+        const c = pendingIce.current.shift();
+        if (c) {
           try { await pc.addIceCandidate(c); } catch {}
         }
       }
 
+      // If it's an offer, create answer
       if (desc.type === "offer") {
+        console.log("Creating answer...");
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
-        safeSend({ type: "sdp", data: { ...answer, from: myIdRef.current } });
+        safeSend({ type: "sdp", data: answer });
+        console.log("Answer sent");
         setStatus("Réponse envoyée");
+      } else if (desc.type === "answer") {
+        console.log("Answer received, connection should be established");
+        setStatus("Connexion établie");
       }
     } catch (e) {
-      console.warn("Erreur SDP", e, "state=", pc.signalingState);
+      console.warn("Erreur SDP", e);
     }
   };
 
   const handleRemoteICE = async (cand: RTCIceCandidateInit) => {
     const pc = ensurePC();
-    if (!pc.remoteDescription) { pendingIce.current.push(cand); return; }
-    try { await pc.addIceCandidate(cand); } catch (e) { console.warn("ICE", e); }
+    if (!pc.remoteDescription) { 
+      pendingIce.current.push(cand); 
+      return; 
+    }
+    try { 
+      await pc.addIceCandidate(cand); 
+    } catch (e) { 
+      console.warn("ICE", e); 
+    }
   };
 
   // Assure d'avoir le flux local (utile si on reçoit une offre avant d'avoir accepté la caméra)
@@ -254,7 +266,6 @@ export default function Room() {
           }
         });
         setStatus("Caméra prête");
-        tryCreateOffer();
       } catch {
         setStatus("Accès caméra refusé");
       }
@@ -271,25 +282,67 @@ export default function Room() {
     ws.onopen = () => {
       setWsReady(true);
       setStatus(s => s + " | WS connecté");
-      safeSend({ type: "system", data: { event: "join", clientId: myIdRef.current } });
     };
     ws.onclose = () => { setWsReady(false); };
     ws.onerror = () => {};
     ws.onmessage = async (ev) => {
-      let msg: Msg; try { msg = JSON.parse(ev.data); } catch { return; }
+      let msg: Msg; 
+      try { msg = JSON.parse(ev.data); } catch { return; }
+      console.log("WS RX:", msg.type, msg.data);
+      
       if (msg.type === "system") {
-        const cid = msg.data.clientId;
-        if (cid && cid !== myIdRef.current && !otherIdRef.current) {
-          otherIdRef.current = cid;
-          setStatus(s => s + " | Pair détecté");
-          tryCreateOffer();
+        const { event } = msg.data;
+        
+        if (event === "peer_left") {
+          console.log("Peer left - resetting");
+          setHasPeer(false);
+          offerMadeRef.current = false;
+          if (pcRef.current) {
+            pcRef.current.close();
+            pcRef.current = null;
+          }
+          if (remoteVideoRef.current) {
+            remoteVideoRef.current.srcObject = null;
+          }
+          setStatus("En attente d'un autre participant...");
+        }
+        
+        if (event === "start_call") {
+          console.log("Start call - both clients ready");
+          setHasPeer(true);
+          offerMadeRef.current = false;
+          setStatus(s => s.split(" | ")[0] + " | Démarrage de l'appel...");
+          
+          // Create offer directly without setTimeout to avoid state issues
+          const createOfferNow = async () => {
+            const pc = ensurePC();
+            try {
+              console.log("Creating offer immediately...");
+              offerMadeRef.current = true;
+              const offer = await pc.createOffer();
+              await pc.setLocalDescription(offer);
+              safeSend({ type: "sdp", data: offer });
+              console.log("Offer sent:", offer.type);
+              setStatus("Offre envoyée");
+            } catch (e) {
+              console.warn("Erreur création offre", e);
+              offerMadeRef.current = false;
+            }
+          };
+          
+          // Use a small random delay to avoid collision
+          const delay = Math.random() * 500 + 100;
+          setTimeout(createOfferNow, delay);
         }
         return;
       }
-      if (msg.type === "sdp") { await handleRemoteSDP(msg.data); return; }
+      
+      if (msg.type === "sdp") { 
+        await handleRemoteSDP(msg.data); 
+        return; 
+      }
+      
       if (msg.type === "ice") {
-        // Ignore self ICE echo
-        if ((msg.data as any).from === myIdRef.current) return;
         await handleRemoteICE(msg.data);
         return;
       }
@@ -300,7 +353,10 @@ export default function Room() {
   }, [wsURL]);
 
   // ---- Cleanup PC ----
-  useEffect(() => () => { try { pcRef.current?.close(); } catch {}; pcRef.current = null; }, []);
+  useEffect(() => () => {
+    try { pcRef.current?.close(); } catch {};
+    pcRef.current = null;
+  }, []);
 
   return (
     <main className="w-full h-screen overflow-hidden relative select-none">
@@ -315,7 +371,19 @@ export default function Room() {
       >
         <div className="w-full h-full flex bg-black">
           <video ref={localVideoRef} autoPlay playsInline muted className="w-1/2 h-full object-cover" />
-          <video ref={remoteVideoRef} autoPlay playsInline className="w-1/2 h-full object-cover" />
+          <video 
+            ref={remoteVideoRef} 
+            autoPlay 
+            playsInline 
+            className="w-1/2 h-full object-cover"
+            onClick={() => {
+              // Clic manuel pour forcer la lecture si autoplay échoue
+              if (remoteVideoRef.current) {
+                console.log("Manual click - trying to play remote video");
+                remoteVideoRef.current.play().catch(e => console.warn("Manual play failed:", e));
+              }
+            }}
+          />
         </div>
         {/* Resize handle invisible but active */}
         <div

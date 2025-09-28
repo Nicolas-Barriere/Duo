@@ -1,56 +1,65 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Dict, Set
+from typing import Dict
 
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # remplace par ton domaine en prod
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-class WSMessage(BaseModel):
-    type: str  # "control" | "state" | "sdp" | "ice" | "join" | "leave" | "chat"
-    data: dict
-
-# Gestion simple en mémoire (MVP)
-rooms: Dict[str, Set[WebSocket]] = {}
-
-async def broadcast(room_id: str, msg: dict, sender: WebSocket | None = None):
-    conns = rooms.get(room_id, set())
-    dead = []
-    for ws in conns:
-        if ws is sender:
-            continue
-        try:
-            await ws.send_json(msg)
-        except Exception:
-            dead.append(ws)
-    for d in dead:
-        conns.discard(d)
+# Simple rooms for 2 people max
+rooms: Dict[str, list[WebSocket]] = {}
 
 @app.websocket("/ws/{room_id}")
 async def ws_room(ws: WebSocket, room_id: str):
     await ws.accept()
+    
+    # Initialize room
     if room_id not in rooms:
-        rooms[room_id] = set()
-    rooms[room_id].add(ws)
-    try:
-        await broadcast(room_id, {"type": "system", "data": {"event": "join"}}, sender=ws)
-        while True:
-            raw = await ws.receive_json()
-            # Valider minimalement
+        rooms[room_id] = []
+    
+    room = rooms[room_id]
+    
+    # Max 2 people
+    if len(room) >= 2:
+        await ws.close(code=1013, reason="Room full")
+        return
+    
+    is_first_person = len(room) == 0
+    room.append(ws)
+    
+    # Only notify when we have exactly 2 people
+    if len(room) == 2:
+        # Tell both clients they can start WebRTC
+        for client in room:
             try:
-                msg = WSMessage(**raw)
-            except Exception:
-                continue
-            # Re-broadcast aux autres ET à l'expéditeur pour synchronisation complète
-            await broadcast(room_id, raw, sender=None)  # sender=None pour inclure l'expéditeur
+                await client.send_json({"type": "system", "data": {"event": "start_call"}})
+            except:
+                pass
+    
+    try:
+        while True:
+            data = await ws.receive_json()
+            # Relay to other person
+            for other_ws in room:
+                if other_ws != ws:
+                    try:
+                        await other_ws.send_json(data)
+                    except:
+                        if other_ws in room:
+                            room.remove(other_ws)
     except WebSocketDisconnect:
         pass
     finally:
-        rooms[room_id].discard(ws)
-        await broadcast(room_id, {"type": "system", "data": {"event": "leave"}}, sender=ws)
+        if ws in room:
+            room.remove(ws)
+        # Tell remaining person to reset
+        for other_ws in room:
+            try:
+                await other_ws.send_json({"type": "system", "data": {"event": "peer_left"}})
+            except:
+                pass
