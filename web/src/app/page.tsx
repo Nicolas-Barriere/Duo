@@ -23,7 +23,7 @@ export default function Home() {
           value={roomId}
           onChange={e => setRoomId(e.target.value)}
           placeholder="ID de salle"
-          className="w-full px-3 py-2 rounded-xl bg-neutral-800"
+          className="w-full px-3 py-2 rounded-xl"
         />
         <button
           onClick={() => roomId && router.push(`/room/${roomId}`)}
