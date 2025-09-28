@@ -3,10 +3,21 @@ import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 
 // Messages échangés via WebSocket
+// Ajout d'un nouveau type pour la synchronisation YouTube
+type YTAction = { action: "load"; videoId: string } | { action: "play"; time: number } | { action: "pause"; time: number } | { action: "seek"; time: number } | { action: "rate"; rate: number };
+
 type Msg =
   | { type: "system"; data: { event: "start_call" | "peer_left" } }
   | { type: "sdp"; data: RTCSessionDescriptionInit }
-  | { type: "ice"; data: RTCIceCandidateInit };
+  | { type: "ice"; data: RTCIceCandidateInit }
+  | { type: "yt"; data: YTAction & { origin: string } };
+
+declare global {
+  interface Window {
+    YT: any;
+    onYouTubeIframeAPIReady: () => void;
+  }
+}
 
 export default function Room() {
   const { id: roomId } = useParams<{ id: string }>();
@@ -26,6 +37,11 @@ export default function Room() {
   // UI refs
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
+  const youtubeContainerRef = useRef<HTMLDivElement | null>(null);
+  const ytPlayerRef = useRef<any>(null);
+  const ytReadyRef = useRef(false);
+  const selfIdRef = useRef<string>(Math.random().toString(36).slice(2)); // stable id
+  const lastSentRef = useRef<{ action?: string; t?: number }>({});
 
   // État de connexion simple
   const [hasPeer, setHasPeer] = useState(false);
@@ -85,7 +101,6 @@ export default function Room() {
   const safeSend = (m: Msg) => {
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
-      console.log("WS TX:", m.type, m.data);
       ws.send(JSON.stringify(m));
     }
   };
@@ -286,10 +301,19 @@ export default function Room() {
     ws.onclose = () => { setWsReady(false); };
     ws.onerror = () => {};
     ws.onmessage = async (ev) => {
-      let msg: Msg; 
-      try { msg = JSON.parse(ev.data); } catch { return; }
-      console.log("WS RX:", msg.type, msg.data);
-      
+      let msg: Msg; try { msg = JSON.parse(ev.data); } catch { return; }
+      // console.log("WS RX:", msg.type, msg.data);
+      if (msg.type === "yt") {
+        // Ignore own actions
+        if (msg.data.origin === selfIdRef.current) return;
+        const p = ytPlayerRef.current; if (!p) return;
+        if (msg.data.action === "play") { p.seekTo(msg.data.time, true); p.playVideo(); }
+        else if (msg.data.action === "pause") { p.seekTo(msg.data.time, true); p.pauseVideo(); }
+        else if (msg.data.action === "seek") { p.seekTo(msg.data.time, true); }
+        else if (msg.data.action === "rate") { p.setPlaybackRate(msg.data.rate); }
+        else if (msg.data.action === "load") { p.loadVideoById(msg.data.videoId); }
+        return;
+      }
       if (msg.type === "system") {
         const { event } = msg.data;
         
@@ -358,11 +382,69 @@ export default function Room() {
     pcRef.current = null;
   }, []);
 
+  // Chargement dynamique API YouTube + init lecteur
+  useEffect(() => {
+    if (window.YT && window.YT.Player) {
+      initPlayer();
+    } else {
+      const tag = document.createElement("script");
+      tag.src = "https://www.youtube.com/iframe_api";
+      tag.async = true;
+      document.body.appendChild(tag);
+      window.onYouTubeIframeAPIReady = () => initPlayer();
+    }
+    function initPlayer() {
+      if (ytPlayerRef.current || !youtubeContainerRef.current) return;
+      ytPlayerRef.current = new window.YT.Player(youtubeContainerRef.current, {
+        height: "320",
+        width: "560",
+        videoId: "dQw4w9WgXcQ", // vidéo par défaut (remplaçable via action load)
+        playerVars: { rel: 0, playsinline: 1 },
+        events: {
+          onReady: () => { ytReadyRef.current = true; },
+          onStateChange: (e: any) => {
+            // 1 = PLAYING, 2 = PAUSED
+            if (!wsRef.current || e.data === window.YT.PlayerState.BUFFERING) return;
+            const t = ytPlayerRef.current?.getCurrentTime?.() || 0;
+            if (e.data === window.YT.PlayerState.PLAYING) {
+              // éviter spam si temps quasi identique
+              if (lastSentRef.current.action !== "play" || Math.abs((lastSentRef.current.t || 0) - t) > 0.5) {
+                safeSend({ type: "yt", data: { action: "play", time: t, origin: selfIdRef.current } });
+                lastSentRef.current = { action: "play", t };
+              }
+            } else if (e.data === window.YT.PlayerState.PAUSED) {
+              if (lastSentRef.current.action !== "pause" || Math.abs((lastSentRef.current.t || 0) - t) > 0.5) {
+                safeSend({ type: "yt", data: { action: "pause", time: t, origin: selfIdRef.current } });
+                lastSentRef.current = { action: "pause", t };
+              }
+            }
+          }
+        }
+      });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const ytSeek = (delta: number) => {
+    const p = ytPlayerRef.current; if (!p) return;
+    const nt = Math.max(0, p.getCurrentTime() + delta);
+    p.seekTo(nt, true);
+    safeSend({ type: "yt", data: { action: "seek", time: nt, origin: selfIdRef.current } });
+  };
+  const ytSetRate = (rate: number) => {
+    const p = ytPlayerRef.current; if (!p) return;
+    p.setPlaybackRate(rate);
+    safeSend({ type: "yt", data: { action: "rate", rate, origin: selfIdRef.current } });
+  };
+  const ytLoad = (videoId: string) => {
+    const p = ytPlayerRef.current; if (!p) return;
+    p.loadVideoById(videoId);
+    safeSend({ type: "yt", data: { action: "load", videoId, origin: selfIdRef.current } });
+  };
+
   return (
     <main className="w-full h-screen overflow-hidden relative select-none">
-      <div className="absolute top-2 left-2 text-xs text-neutral-400 font-mono pointer-events-none">
-        Salle {roomId} | {status}
-      </div>
+      <div className="absolute top-2 left-2 text-xs text-neutral-400 font-mono pointer-events-none">Salle {roomId} | {status}</div>
       <div
         ref={containerRef}
         onPointerDown={startDrag}
@@ -392,6 +474,20 @@ export default function Room() {
           className="absolute bottom-0 right-0 w-5 h-5 cursor-se-resize"
           style={{ touchAction: 'none' }}
         />
+      </div>
+      {/* Lecteur YouTube synchronisé */}
+      <div className="absolute top-4 right-4 z-10 bg-black/60 backdrop-blur rounded-md p-2 text-xs text-white space-y-2 w-[580px]">
+        <div ref={youtubeContainerRef} className="w-full aspect-video bg-black" />
+        <div className="flex flex-wrap gap-2">
+          <button onClick={() => ytPlayerRef.current?.playVideo()} className="px-2 py-1 bg-green-600 rounded">Play</button>
+          <button onClick={() => ytPlayerRef.current?.pauseVideo()} className="px-2 py-1 bg-yellow-600 rounded">Pause</button>
+          <button onClick={() => ytSeek(-10)} className="px-2 py-1 bg-slate-700 rounded">-10s</button>
+            <button onClick={() => ytSeek(10)} className="px-2 py-1 bg-slate-700 rounded">+10s</button>
+          <button onClick={() => ytSetRate(1)} className="px-2 py-1 bg-slate-700 rounded">1x</button>
+          <button onClick={() => ytSetRate(1.5)} className="px-2 py-1 bg-slate-700 rounded">1.5x</button>
+          <button onClick={() => ytSetRate(2)} className="px-2 py-1 bg-slate-700 rounded">2x</button>
+          <button onClick={() => ytLoad(prompt("ID vidéo YouTube:") || "dQw4w9WgXcQ")} className="px-2 py-1 bg-indigo-600 rounded">Load</button>
+        </div>
       </div>
     </main>
   );
