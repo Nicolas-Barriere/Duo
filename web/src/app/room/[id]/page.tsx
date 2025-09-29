@@ -831,6 +831,17 @@ export default function Room() {
   };
 
   const [currentVideoId, setCurrentVideoId] = useState<string | null>(null);
+  const [showYTDebug, setShowYTDebug] = useState(false);
+
+  useEffect(() => {
+    const p = ytPlayerRef.current;
+    if (!p) return;
+    if (cinemaMode || showYTDebug) {
+      try { p.setSize(320, 270); } catch {}
+    } else {
+      try { p.setSize(1, 1); } catch {}
+    }
+  }, [cinemaMode, showYTDebug]);
 
   return (
     <main className="w-full h-screen overflow-hidden relative select-none">
@@ -890,6 +901,7 @@ export default function Room() {
             <button onClick={() => ytSetRate(Math.max(0.25, Math.min(ytState.rate - 0.25, 2))) } className="px-2 py-1 bg-slate-700 rounded">-0.25</button>
             <span className="w-10 text-center text-xs">{ytState.rate.toFixed(2)}x</span>
             <button onClick={() => ytSetRate(Math.max(0.25, Math.min(ytState.rate + 0.25, 2))) } className="px-2 py-1 bg-slate-700 rounded">+0.25</button>
+            <button onClick={() => setShowYTDebug(d => !d)} className="px-2 py-1 bg-slate-800 rounded hover:bg-slate-700">{showYTDebug ? 'YT Hide' : 'YT Debug'}</button>
           </div>
         </div>
         <div className="flex items-center gap-3">
@@ -912,7 +924,7 @@ export default function Room() {
         </div>
       </div>
       <video ref={videoProxyRef} autoPlay playsInline muted className="hidden" />
-      <div ref={youtubeContainerRef} className="w-0 h-0 overflow-hidden" />
+      <div ref={youtubeContainerRef} className={(cinemaMode || showYTDebug) ? "absolute bottom-24 right-4 w-80 h-48 bg-black/80 border border-purple-500 rounded overflow-hidden z-50" : "w-0 h-0 overflow-hidden"} />
     </main>
   );
 }
