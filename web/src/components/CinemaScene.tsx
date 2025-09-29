@@ -146,7 +146,7 @@ function CameraRig() {
   return <group ref={ref} />;
 }
 
-function CameraMover() {
+function CameraMover({ primaryVideo }: { primaryVideo?: HTMLVideoElement | null }) {
   const { camera, gl } = useThree();
   const keys = useRef<Record<string, boolean>>({});
   const speedRef = useRef(3.2); // m/s
@@ -160,7 +160,25 @@ function CameraMover() {
     yawRef.current = camera.rotation.y;
     pitchRef.current = camera.rotation.x;
 
-    const down = (e: KeyboardEvent) => { keys.current[e.code] = true; if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) e.preventDefault(); };
+    const down = (e: KeyboardEvent) => {
+      // Shortcuts before movement state
+      if (e.code === 'KeyP') {
+        e.preventDefault();
+        const v = primaryVideo; if (v) { if (v.paused) v.play().catch(()=>{}); else v.pause(); }
+        return; // ne pas marquer comme mouvement
+      }
+      if (e.code === 'KeyC') {
+        e.preventDefault();
+        // Position recentrée encore plus proche de l'écran (écran à z=-4)
+        camera.position.set(0, 1.6, -0.8); // avant: 0.7
+        yawRef.current = 0; pitchRef.current = 0;
+        camera.rotation.set(0,0,0,'YXZ');
+        camera.lookAt(0,1.5,-4);
+        return;
+      }
+      keys.current[e.code] = true;
+      if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) e.preventDefault();
+    };
     const up = (e: KeyboardEvent) => { keys.current[e.code] = false; };
     const onMouseMove = (e: MouseEvent) => {
       if (!locked) return;
@@ -178,7 +196,14 @@ function CameraMover() {
 
     const onLock = () => setLocked(true);
     const onUnlock = () => setLocked(false);
-    const request = () => { if (!locked) gl.domElement.requestPointerLock(); };
+    const request = () => {
+      if (!locked) {
+        gl.domElement.requestPointerLock();
+      } else {
+        // Toggle off FPV on click when already locked
+        document.exitPointerLock?.();
+      }
+    };
     gl.domElement.addEventListener('click', request);
     document.addEventListener('pointerlockchange', () => {
       if (document.pointerLockElement === gl.domElement) onLock(); else onUnlock();
@@ -224,15 +249,16 @@ export function CinemaScene({ videoEl, enabled = true, mainVideoEl, localVideoEl
         <ambientLight intensity={0.35} />
         <directionalLight position={[4, 6, 4]} intensity={1} castShadow shadow-mapSize-width={1024} shadow-mapSize-height={1024} />
         <MainScreen videoEl={primary} showPlayOverlay={showPlayOverlay} onPlayClick={onPlayClick} />
-        <VideoPanel videoEl={localVideoEl || null} position={[-3.3, 1.5, -4]} rotation={[0, 0, 0]} label="Moi" />
-        <VideoPanel videoEl={remoteVideoEl || null} position={[3.3, 1.5, -4]} rotation={[0, 0, 0]} label="Remote" />
+        {/* Participant video panels au-dessus de l'écran */}
+        <VideoPanel videoEl={localVideoEl || null} position={[-1, 2.95, -4]} rotation={[0, 0, 0]} label="Moi" />
+        <VideoPanel videoEl={remoteVideoEl || null} position={[1, 2.95, -4]} rotation={[0, 0, 0]} label="Remote" />
         <Seats />
         <RoomDeco />
         <Environment preset="city" />
         <CameraRig />
-        <CameraMover />
+        <CameraMover primaryVideo={primary} />
       </Canvas>
-      <div className="absolute top-2 left-1/2 -translate-x-1/2 text-[10px] text-neutral-500 bg-black/30 px-2 py-1 rounded pointer-events-none">Clique dans la scène puis souris + WASD / flèches. Esc pour quitter.</div>
+      <div className="absolute top-2 left-1/2 -translate-x-1/2 text-[10px] text-neutral-500 bg-black/30 px-2 py-1 rounded pointer-events-none">Clique pour entrer/sortir FPV • WASD / Flèches pour bouger • Souris pour regarder • P: Play/Pause • C: Center • Esc aussi pour sortir.</div>
     </div>
   );
 }
