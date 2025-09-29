@@ -12,6 +12,7 @@ interface CinemaProps {
   remoteVideoEl?: HTMLVideoElement | null;
   showPlayOverlay?: boolean; // new
   onPlayClick?: () => void;   // new
+  onPlayPauseHotkey?: () => void; // new hotkey callback
 }
 
 // Reusable hook to build a video texture when ready
@@ -146,7 +147,7 @@ function CameraRig() {
   return <group ref={ref} />;
 }
 
-function CameraMover({ primaryVideo }: { primaryVideo?: HTMLVideoElement | null }) {
+function CameraMover({ primaryVideo, onPlayPauseHotkey }: { primaryVideo?: HTMLVideoElement | null; onPlayPauseHotkey?: () => void }) {
   const { camera, gl } = useThree();
   const keys = useRef<Record<string, boolean>>({});
   const speedRef = useRef(3.2); // m/s
@@ -164,7 +165,9 @@ function CameraMover({ primaryVideo }: { primaryVideo?: HTMLVideoElement | null 
       // Shortcuts before movement state
       if (e.code === 'KeyP') {
         e.preventDefault();
-        const v = primaryVideo; if (v) { if (v.paused) v.play().catch(()=>{}); else v.pause(); }
+        if (onPlayPauseHotkey) onPlayPauseHotkey(); else {
+          const v = primaryVideo; if (v) { if (v.paused) v.play().catch(()=>{}); else v.pause(); }
+        }
         return; // ne pas marquer comme mouvement
       }
       if (e.code === 'KeyC') {
@@ -238,7 +241,7 @@ function CameraMover({ primaryVideo }: { primaryVideo?: HTMLVideoElement | null 
   return null;
 }
 
-export function CinemaScene({ videoEl, enabled = true, mainVideoEl, localVideoEl, remoteVideoEl, showPlayOverlay, onPlayClick }: CinemaProps) {
+export function CinemaScene({ videoEl, enabled = true, mainVideoEl, localVideoEl, remoteVideoEl, showPlayOverlay, onPlayClick, onPlayPauseHotkey }: CinemaProps) {
   if (!enabled) return null;
   const primary = mainVideoEl !== undefined ? mainVideoEl : videoEl; // fallback
   return (
@@ -256,7 +259,7 @@ export function CinemaScene({ videoEl, enabled = true, mainVideoEl, localVideoEl
         <RoomDeco />
         <Environment preset="city" />
         <CameraRig />
-        <CameraMover primaryVideo={primary} />
+        <CameraMover primaryVideo={primary} onPlayPauseHotkey={onPlayPauseHotkey} />
       </Canvas>
       <div className="absolute top-2 left-1/2 -translate-x-1/2 text-[10px] text-neutral-500 bg-black/30 px-2 py-1 rounded pointer-events-none">Clique pour entrer/sortir FPV • WASD / Flèches pour bouger • Souris pour regarder • P: Play/Pause • C: Center • Esc aussi pour sortir.</div>
     </div>

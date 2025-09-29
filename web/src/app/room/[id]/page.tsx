@@ -12,7 +12,8 @@ type Msg =
   | { type: "system"; data: { event: "start_call" | "peer_left" } }
   | { type: "sdp"; data: RTCSessionDescriptionInit }
   | { type: "ice"; data: RTCIceCandidateInit }
-  | { type: "yt"; data: YTAction & { origin: string } };
+  | { type: "yt"; data: YTAction & { origin: string } }
+  | { type: "cinema"; data: { action: 'play' | 'pause' | 'start' | 'stop'; t?: number; id?: string; playlist?: string; origin: string } }; // new cinema sync
 
 declare global {
   interface Window {
@@ -392,6 +393,83 @@ export default function Room() {
         await handleRemoteICE(msg.data);
         return;
       }
+      if (msg.type === 'cinema') {
+        if (msg.data.origin === selfIdRef.current) return; // ignore self
+        const el = videoProxyRef.current;
+        if (msg.data.action === 'start') {
+          // Remote started a cinema session: attach HLS without prompting
+            if (cinemaSession && cinemaSession.id === msg.data.id) return; // already same
+            // If different existing session, stop it first
+            if (cinemaSession && cinemaSession.id !== msg.data.id) {
+              await stopCinemaStream();
+            }
+            if (!msg.data.id || !msg.data.playlist) return;
+            setCinemaSession({ id: msg.data.id, playlist: msg.data.playlist });
+            setCinemaUserStarted(false); cinemaUserStartedRef.current = false;
+            // Prepare HLS attach similar to startCinemaStream (remote)
+            setTimeout(async () => {
+              if (!videoProxyRef.current) return;
+              const vEl = videoProxyRef.current;
+              vEl.muted = true; // keep muted until user decides
+              vEl.volume = 1;
+              setCinemaAudioOn(false);
+              setMicMutedDuringCinema(false);
+              let firstPlayKick = true;
+              const onFirstPlaying = () => {
+                if (!firstPlayKick) return; firstPlayKick = false;
+                setTimeout(() => { try { vEl.pause(); vEl.play().catch(()=>{}); } catch {} }, 120);
+                vEl.removeEventListener('playing', onFirstPlaying);
+              };
+              vEl.addEventListener('playing', onFirstPlaying);
+              const full = (process.env.NEXT_PUBLIC_BACKEND_HTTP || 'http://localhost:8001') + msg.data.playlist;
+              let HlsDyn: any = null;
+              try { const mod = await import('hls.js'); HlsDyn = mod.default || mod; } catch {}
+              const H = HlsDyn;
+              if (H && H.isSupported && H.isSupported()) {
+                const hls = new H({ enableWorker: true, lowLatencyMode: false, liveSyncDurationCount: 3, maxBufferLength: 60, maxBufferSize: 120*1000*1000, maxLiveSyncPlaybackRate: 1.0, fragLoadingTimeOut: 20000, manifestLoadingTimeOut: 20000, autoStartLoad: true });
+                hlsRef.current = hls; hls.loadSource(full); hls.attachMedia(vEl);
+                let firstManifest = true;
+                hls.on(H.Events.MANIFEST_PARSED, () => {
+                  try { if (firstManifest) { vEl.currentTime = 0; firstManifest = false; } } catch {}
+                  // Apply any pending play/pause received earlier
+                  if (pendingCinemaCmdRef.current) {
+                    const cmd = pendingCinemaCmdRef.current; pendingCinemaCmdRef.current = null;
+                    try { vEl.currentTime = cmd.t; } catch {}
+                    if (cmd.action === 'play') { vEl.play().catch(()=>{}); setCinemaPaused(false); }
+                    else { vEl.pause(); setCinemaPaused(true); }
+                  }
+                });
+              } else if (vEl.canPlayType('application/vnd.apple.mpegurl')) {
+                vEl.src = full;
+              } else { vEl.src = full; }
+            }, 300);
+          return;
+        }
+        if (msg.data.action === 'stop') {
+          if (cinemaSession && cinemaSession.id === msg.data.id) {
+            await stopCinemaStream();
+          }
+          return;
+        }
+        if (!el || !cinemaSession) {
+          if ((msg.data.action === 'play' || msg.data.action === 'pause') && typeof msg.data.t === 'number') {
+            pendingCinemaCmdRef.current = { action: msg.data.action, t: msg.data.t };
+          }
+          return;
+        }
+        if (msg.data.action === 'play' && typeof msg.data.t === 'number') {
+          try { el.currentTime = msg.data.t; } catch {}
+          // Marquer comme démarré si déclenché à distance (cache overlay)
+          if (!cinemaUserStartedRef.current) { cinemaUserStartedRef.current = true; setCinemaUserStarted(true); }
+          el.play().catch(()=>{}); // restera muted tant que l'utilisateur n'active pas le son
+          setCinemaPaused(false);
+        } else if (msg.data.action === 'pause' && typeof msg.data.t === 'number') {
+          try { el.currentTime = msg.data.t; } catch {}
+          el.pause();
+          setCinemaPaused(true);
+        }
+        return;
+      }
     };
 
     return () => { try { ws.close(); } catch {} };
@@ -523,6 +601,8 @@ export default function Room() {
   const [micMutedDuringCinema, setMicMutedDuringCinema] = useState(false);
   const [cinemaPaused, setCinemaPaused] = useState(false);
   const hlsRef = useRef<any>(null);
+  // New refs for cinema sync
+  const pendingCinemaCmdRef = useRef<{ action: 'play' | 'pause'; t: number } | null>(null);
   // New: user must click play (no autoplay)
   const [cinemaUserStarted, setCinemaUserStarted] = useState(false);
   const cinemaUserStartedRef = useRef(false);
@@ -530,41 +610,27 @@ export default function Room() {
   // Chargement paresseux hls.js si pas installé côté types
   let HlsLib: any = null;
   const startCinemaStream = async () => {
-    // Stop existing session to éviter anciens hls qui continuent à requêter (404)
-    if (cinemaSession) {
-      await stopCinemaStream();
-    }
+    if (cinemaSession) { await stopCinemaStream(); }
     const vid = prompt('ID YouTube à projeter (ex: dQw4w9WgXcQ)');
     if (!vid) return;
     try {
-      const r = await fetch((process.env.NEXT_PUBLIC_BACKEND_HTTP || 'http://localhost:8001') + '/cinema/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ videoId: vid })
-      });
+      const r = await fetch((process.env.NEXT_PUBLIC_BACKEND_HTTP || 'http://localhost:8001') + '/cinema/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ videoId: vid }) });
       if (!r.ok) { alert('Erreur création session'); return; }
       const j = await r.json();
       setCinemaSession({ id: j.sessionId, playlist: j.playlist });
-      setCinemaUserStarted(false); cinemaUserStartedRef.current = false; // reset manual start state
+      // Broadcast session start to peer
+      safeSend({ type: 'cinema', data: { action: 'start', id: j.sessionId, playlist: j.playlist, origin: selfIdRef.current } });
+      setCinemaUserStarted(false); cinemaUserStartedRef.current = false; // reset
       const full = (process.env.NEXT_PUBLIC_BACKEND_HTTP || 'http://localhost:8001') + j.playlist;
       setTimeout(async () => {
         if (!videoProxyRef.current) return;
         const el = videoProxyRef.current;
-        // Préparation: rester PAUSED & MUTED jusqu'au clic Play utilisateur (policy ok car pas d'autoplay)
-        el.muted = true;
-        el.volume = 1;
-        setCinemaAudioOn(false);
-        setMicMutedDuringCinema(false);
-        // Kick premier frame seulement après lecture réelle maintenant (quand user clique Play)
+        el.muted = true; el.volume = 1;
+        setCinemaAudioOn(false); setMicMutedDuringCinema(false);
         let firstPlayKick = true;
-        const onFirstPlaying = () => {
-          if (!firstPlayKick) return;
-            firstPlayKick = false;
-            setTimeout(() => { try { el.pause(); el.play().catch(()=>{}); } catch {} }, 120);
-            el.removeEventListener('playing', onFirstPlaying);
-        };
+        const onFirstPlaying = () => { if (!firstPlayKick) return; firstPlayKick = false; setTimeout(()=>{ try { el.pause(); el.play().catch(()=>{}); } catch {} },120); el.removeEventListener('playing', onFirstPlaying); };
         el.addEventListener('playing', onFirstPlaying);
-
+        // Préparation: rester PAUSED & MUTED jusqu'au clic Play utilisateur (policy ok car pas d'autoplay)
         let HlsLib: any = null;
         try { if (!HlsLib) { const mod = await import('hls.js'); HlsLib = mod.default || mod; } } catch {}
         const H = HlsLib;
@@ -697,15 +763,12 @@ export default function Room() {
   };
   const stopCinemaStream = async () => {
     if (!cinemaSession) return;
+    const old = cinemaSession;
     try { await fetch((process.env.NEXT_PUBLIC_BACKEND_HTTP || 'http://localhost:8001') + '/cinema/stop/' + cinemaSession.id, { method: 'POST' }); } catch {}
+    safeSend({ type: 'cinema', data: { action: 'stop', id: old.id, origin: selfIdRef.current } });
     if (videoProxyRef.current) { videoProxyRef.current.pause(); videoProxyRef.current.muted = true; videoProxyRef.current.removeAttribute('src'); videoProxyRef.current.load(); }
     if (micMutedDuringCinema) { localStreamRef.current?.getAudioTracks().forEach(t => t.enabled = true); }
-    setCinemaAudioOn(false);
-    setMicMutedDuringCinema(false);
-    setCinemaPaused(false);
-    setCinemaUserStarted(false); cinemaUserStartedRef.current = false;
-    hlsRef.current = null;
-    setCinemaSession(null);
+    setCinemaAudioOn(false); setMicMutedDuringCinema(false); setCinemaPaused(false); setCinemaUserStarted(false); cinemaUserStartedRef.current = false; hlsRef.current = null; setCinemaSession(null);
   };
   const enableCinemaAudio = () => {
     const el = videoProxyRef.current; if (!el) return;
@@ -721,16 +784,19 @@ export default function Room() {
   const pauseCinema = () => {
     if (!videoProxyRef.current) return;
     videoProxyRef.current.pause();
-    // Optionnel: arrêter chargement segments
     try { hlsRef.current?.stopLoad?.(); } catch {}
     setCinemaPaused(true);
+    // broadcast pause
+    safeSend({ type: 'cinema', data: { action: 'pause', t: videoProxyRef.current.currentTime, origin: selfIdRef.current } });
   };
   const playCinema = () => {
     if (!videoProxyRef.current) return;
     try { hlsRef.current?.startLoad?.(); } catch {}
     videoProxyRef.current.play().catch(()=>{});
     setCinemaPaused(false);
-    if (!cinemaUserStartedRef.current) { setCinemaUserStarted(true); cinemaUserStartedRef.current = true; }
+    if (!cinemaUserStartedRef.current) { setCinemaUserStarted(true); cinemaUserStartedRef.current = true }
+    // broadcast play
+    safeSend({ type: 'cinema', data: { action: 'play', t: videoProxyRef.current.currentTime, origin: selfIdRef.current } });
   };
 
   const [currentVideoId, setCurrentVideoId] = useState<string | null>(null);
@@ -762,7 +828,15 @@ export default function Room() {
               const el = videoProxyRef.current; if (!el) return;
               cinemaUserStartedRef.current = true; setCinemaUserStarted(true);
               el.muted = false;
-              el.play().then(()=>{ setCinemaAudioOn(true); setCinemaPaused(false); }).catch(()=>{ setTimeout(()=>{ el.play().catch(()=>{}); }, 250); });
+              el.play().then(()=>{ setCinemaAudioOn(true); setCinemaPaused(false); safeSend({ type:'cinema', data:{ action:'play', t: el.currentTime, origin: selfIdRef.current } }); }).catch(()=>{ setTimeout(()=>{ el.play().catch(()=>{}); }, 250); });
+            }}
+            onPlayPauseHotkey={() => {
+              const el = videoProxyRef.current; if (!el) return;
+              if (el.paused) {
+                playCinema();
+              } else {
+                pauseCinema();
+              }
             }}
           />
         </div>
@@ -807,7 +881,7 @@ export default function Room() {
             {cinemaSession && <button onClick={stopCinemaStream} className="px-2 py-1 rounded bg-red-600 hover:bg-red-500">Stop</button>}
             {cinemaSession && cinemaUserStarted && !cinemaPaused && <button onClick={pauseCinema} className="px-2 py-1 rounded bg-orange-600 hover:bg-orange-500">Pause</button>}
             {cinemaSession && cinemaUserStarted && cinemaPaused && <button onClick={playCinema} className="px-2 py-1 rounded bg-green-700 hover:bg-green-600">Lecture</button>}
-            {/* Son button removed (lecture démarre avec son) */}
+            {cinemaSession && !cinemaAudioOn && <button onClick={enableCinemaAudio} className="px-2 py-1 rounded bg-blue-600 hover:bg-blue-500">Son</button>}
             {cinemaSession && cinemaAudioOn && <button onClick={toggleMicMuteCinema} className="px-2 py-1 rounded bg-slate-600 hover:bg-slate-500">{micMutedDuringCinema ? 'Mic On' : 'Mic Off'}</button>}
           </div>
           <div className="flex items-center gap-2 text-neutral-400 font-mono"><span>{fmt(ytState.current)}</span><span>/</span><span>{fmt(ytState.duration)}</span></div>
