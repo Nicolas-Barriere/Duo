@@ -160,10 +160,11 @@ function CameraMover() {
     yawRef.current = camera.rotation.y;
     pitchRef.current = camera.rotation.x;
 
-    const down = (e: KeyboardEvent) => { keys.current[e.code] = true; };
+    const down = (e: KeyboardEvent) => { keys.current[e.code] = true; if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) e.preventDefault(); };
     const up = (e: KeyboardEvent) => { keys.current[e.code] = false; };
     const onMouseMove = (e: MouseEvent) => {
       if (!locked) return;
+      // Orientation yaw standard (mouvement souris droite => regarder droite)
       yawRef.current -= e.movementX * sensitivity;
       pitchRef.current -= e.movementY * sensitivity;
       const maxPitch = Math.PI / 2 - 0.05;
@@ -197,14 +198,15 @@ function CameraMover() {
     const strafeAxis = (k['KeyD'] || k['ArrowRight']) ? 1 : (k['KeyA'] || k['ArrowLeft']) ? -1 : 0;
     if (forwardAxis === 0 && strafeAxis === 0) return;
 
-    // Recompute forward from yaw/pitch (ignore pitch for horizontal movement)
-    const yaw = yawRef.current;
-    const forward = new THREE.Vector3(Math.sin(yaw), 0, -Math.cos(yaw)).normalize();
-    const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0,1,0)).normalize(); // forward x up = right
+    // Direction réellement locale (orientation actuelle de la caméra)
+    const forwardDir = new THREE.Vector3();
+    camera.getWorldDirection(forwardDir); // pointe vers l'avant
+    forwardDir.y = 0; if (forwardDir.lengthSq() > 0) forwardDir.normalize();
+    const rightDir = new THREE.Vector3().crossVectors(forwardDir, new THREE.Vector3(0,1,0)).normalize();
 
     const move = new THREE.Vector3();
-    if (forwardAxis) move.addScaledVector(forward, forwardAxis);
-    if (strafeAxis) move.addScaledVector(right, strafeAxis);
+    if (forwardAxis) move.addScaledVector(forwardDir, forwardAxis);
+    if (strafeAxis) move.addScaledVector(rightDir, strafeAxis);
     if (move.lengthSq() > 0) move.normalize().multiplyScalar(speedRef.current * dt);
     camera.position.add(move);
   });
