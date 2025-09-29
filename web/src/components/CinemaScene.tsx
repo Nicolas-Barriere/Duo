@@ -2,7 +2,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
-import { Environment } from '@react-three/drei';
+import { Environment, Html } from '@react-three/drei';
 
 interface CinemaProps {
   videoEl: HTMLVideoElement | null; // backward compat (main video)
@@ -10,6 +10,8 @@ interface CinemaProps {
   mainVideoEl?: HTMLVideoElement | null;
   localVideoEl?: HTMLVideoElement | null;
   remoteVideoEl?: HTMLVideoElement | null;
+  showPlayOverlay?: boolean; // new
+  onPlayClick?: () => void;   // new
 }
 
 // Reusable hook to build a video texture when ready
@@ -40,13 +42,25 @@ function useVideoTexture(videoEl: HTMLVideoElement | null) {
   return texture;
 }
 
-function MainScreen({ videoEl }: { videoEl: HTMLVideoElement | null }) {
+function MainScreen({ videoEl, showPlayOverlay, onPlayClick }: { videoEl: HTMLVideoElement | null; showPlayOverlay?: boolean; onPlayClick?: () => void }) {
   const texture = useVideoTexture(videoEl);
-  if (!texture) return null;
   return (
     <mesh position={[0, 1.5, -4]}>
       <planeGeometry args={[3.2, 1.8]} />
-      <meshBasicMaterial map={texture} toneMapped={false} />
+      {texture ? (
+        <meshBasicMaterial map={texture} toneMapped={false} />
+      ) : (
+        <meshBasicMaterial color="#050505" />
+      )}
+      {showPlayOverlay && (
+        <Html center transform zIndexRange={[10, 20]}>
+          <button
+            onClick={(e) => { e.stopPropagation(); onPlayClick && onPlayClick(); }}
+            className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 border border-white/30 backdrop-blur text-white text-base flex items-center justify-center shadow-xl transition"
+            style={{ cursor: 'pointer' }}
+          >▶</button>
+        </Html>
+      )}
     </mesh>
   );
 }
@@ -197,7 +211,7 @@ function CameraMover() {
   return null;
 }
 
-export function CinemaScene({ videoEl, enabled = true, mainVideoEl, localVideoEl, remoteVideoEl }: CinemaProps) {
+export function CinemaScene({ videoEl, enabled = true, mainVideoEl, localVideoEl, remoteVideoEl, showPlayOverlay, onPlayClick }: CinemaProps) {
   if (!enabled) return null;
   const primary = mainVideoEl !== undefined ? mainVideoEl : videoEl; // fallback
   return (
@@ -207,7 +221,7 @@ export function CinemaScene({ videoEl, enabled = true, mainVideoEl, localVideoEl
         <fog attach="fog" args={["#000", 4, 18]} />
         <ambientLight intensity={0.35} />
         <directionalLight position={[4, 6, 4]} intensity={1} castShadow shadow-mapSize-width={1024} shadow-mapSize-height={1024} />
-        <MainScreen videoEl={primary} />
+        <MainScreen videoEl={primary} showPlayOverlay={showPlayOverlay} onPlayClick={onPlayClick} />
         <VideoPanel videoEl={localVideoEl || null} position={[-3.3, 1.5, -4]} rotation={[0, 0, 0]} label="Moi" />
         <VideoPanel videoEl={remoteVideoEl || null} position={[3.3, 1.5, -4]} rotation={[0, 0, 0]} label="Remote" />
         <Seats />

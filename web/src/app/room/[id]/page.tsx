@@ -523,6 +523,9 @@ export default function Room() {
   const [micMutedDuringCinema, setMicMutedDuringCinema] = useState(false);
   const [cinemaPaused, setCinemaPaused] = useState(false);
   const hlsRef = useRef<any>(null);
+  // New: user must click play (no autoplay)
+  const [cinemaUserStarted, setCinemaUserStarted] = useState(false);
+  const cinemaUserStartedRef = useRef(false);
 
   // Chargement paresseux hls.js si pas installé côté types
   let HlsLib: any = null;
@@ -542,17 +545,27 @@ export default function Room() {
       if (!r.ok) { alert('Erreur création session'); return; }
       const j = await r.json();
       setCinemaSession({ id: j.sessionId, playlist: j.playlist });
+      setCinemaUserStarted(false); cinemaUserStartedRef.current = false; // reset manual start state
       const full = (process.env.NEXT_PUBLIC_BACKEND_HTTP || 'http://localhost:8001') + j.playlist;
       setTimeout(async () => {
         if (!videoProxyRef.current) return;
         const el = videoProxyRef.current;
-        // Activer audio par défaut (le clic sur "Projeter" sert de gesture)
-        try {
-          el.muted = false;
-          el.volume = 1;
-          setCinemaAudioOn(true);
-          setMicMutedDuringCinema(false);
-        } catch {}
+        // Préparation: rester PAUSED & MUTED jusqu'au clic Play utilisateur (policy ok car pas d'autoplay)
+        el.muted = true;
+        el.volume = 1;
+        setCinemaAudioOn(false);
+        setMicMutedDuringCinema(false);
+        // Kick premier frame seulement après lecture réelle maintenant (quand user clique Play)
+        let firstPlayKick = true;
+        const onFirstPlaying = () => {
+          if (!firstPlayKick) return;
+            firstPlayKick = false;
+            setTimeout(() => { try { el.pause(); el.play().catch(()=>{}); } catch {} }, 120);
+            el.removeEventListener('playing', onFirstPlaying);
+        };
+        el.addEventListener('playing', onFirstPlaying);
+
+        let HlsLib: any = null;
         try { if (!HlsLib) { const mod = await import('hls.js'); HlsLib = mod.default || mod; } } catch {}
         const H = HlsLib;
         if (H && H.isSupported && H.isSupported()) {
@@ -583,29 +596,22 @@ export default function Room() {
             const v = videoProxyRef.current; if (!v) return 0;
             try {
               if (v.buffered && v.buffered.length) {
-                // trouver range contenant currentTime
                 for (let i = 0; i < v.buffered.length; i++) {
-                  const start = v.buffered.start(i);
-                  const end = v.buffered.end(i);
-                  if (v.currentTime >= start && v.currentTime <= end) {
-                    return end - v.currentTime;
-                  }
+                  const start = v.buffered.start(i); const end = v.buffered.end(i);
+                  if (v.currentTime >= start && v.currentTime <= end) return end - v.currentTime;
                 }
-                // sinon prendre la dernière range pour estimation
                 const end = v.buffered.end(v.buffered.length - 1);
                 if (end < v.currentTime) return 0;
               }
             } catch {}
             return 0;
           };
-
           const nudgeForward = () => {
             const v = videoProxyRef.current; if (!v) return;
             try {
               if (v.buffered && v.buffered.length) {
                 for (let i = 0; i < v.buffered.length; i++) {
-                  const start = v.buffered.start(i);
-                  const end = v.buffered.end(i);
+                  const start = v.buffered.start(i); const end = v.buffered.end(i);
                   if (v.currentTime >= start - 0.05 && v.currentTime < end && end - v.currentTime > 0.4 && end - v.currentTime < 2.5) {
                     v.currentTime = Math.min(end - 0.3, v.currentTime + 0.25);
                     break;
@@ -614,183 +620,78 @@ export default function Room() {
               }
             } catch {}
           };
-
-          const forceRestartLoad = (pos?: number) => {
-            try { hls.stopLoad(); } catch {}
-            setTimeout(() => { try { hls.startLoad(pos); } catch {}; }, 120);
-          };
-
-          const softRecover = () => {
-            try { hls.recoverMediaError(); } catch {}
-          };
-
+          const forceRestartLoad = (pos?: number) => { try { hls.stopLoad(); } catch {}; setTimeout(() => { try { hls.startLoad(pos); } catch {}; }, 120); };
+          const softRecover = () => { try { hls.recoverMediaError(); } catch {} };
           const hardReload = () => {
-            const now = performance.now();
-            if (now - lastHardReload < 20000) return; // cooldown 20s
-            lastHardReload = now;
+            const now = performance.now(); if (now - lastHardReload < 20000) return; lastHardReload = now;
             console.warn('[HLS] Hard reload source (cooldown)');
-            const v = videoProxyRef.current; if (!v) return;
-            const pos = v.currentTime;
+            const v = videoProxyRef.current; if (!v) return; const pos = v.currentTime;
             try { hls.destroy(); } catch {}
-            const h2 = new H(hls.config); hlsRef.current = h2;
-            h2.loadSource(full);
-            h2.attachMedia(v);
-            // relance à peu près la position (manifest doit être parsé avant seek)
-            h2.on(H.Events.MANIFEST_PARSED, () => {
-              try { if (!cinemaPaused) { v.currentTime = pos; v.play().catch(()=>{}); } } catch {}
-            });
-            stallTries = 0;
-            hardRecoverTries = 0;
+            const h2 = new H(hls.config); hlsRef.current = h2; h2.loadSource(full); h2.attachMedia(v);
+            h2.on(H.Events.MANIFEST_PARSED, () => { try { if (!cinemaPaused && cinemaUserStartedRef.current) { v.currentTime = pos; v.play().catch(()=>{}); } } catch {} });
+            stallTries = 0; hardRecoverTries = 0;
           };
-
           const watchdog = () => {
-            const v = videoProxyRef.current; if (!v) return;
-            const ct = v.currentTime;
-            const bufferLen = getBufferLen();
-            if (ct > lastTime + 0.05) { // progression OK
-              lastAdvance = performance.now();
-              lastTime = ct;
-              stallTries = 0;
-              hardRecoverTries = 0;
-            } else {
+            const v = videoProxyRef.current; if (!v) return; const ct = v.currentTime; const bufferLen = getBufferLen();
+            if (ct > lastTime + 0.05) { lastAdvance = performance.now(); lastTime = ct; stallTries = 0; hardRecoverTries = 0; }
+            else {
               const since = performance.now() - lastAdvance;
               if (!v.paused && since > 2000) {
-                // Ne considérer un stall que si buffer réduit
                 if (bufferLen < 0.25) {
                   stallTries++;
-                  if (stallTries === 1) {
-                    v.play().catch(()=>{});
-                  } else if (stallTries === 2) {
-                    forceRestartLoad(ct);
-                  } else if (stallTries === 3) {
-                    nudgeForward();
-                  } else if (stallTries === 4) {
-                    softRecover();
-                  } else if (stallTries >= 5) {
-                    // Vérifier absence de nouveaux fragments significatifs
-                    const noNewFrags = (performance.now() - lastFragTs) > 8000;
-                    hardRecoverTries++;
-                    if (noNewFrags && hardRecoverTries >= 2) {
-                      hardReload();
-                    } else {
-                      // simple restart load ciblé
-                      forceRestartLoad(ct);
-                    }
-                    if (hardRecoverTries > 6) hardRecoverTries = 6; // cap
-                    stallTries = 0; // relancer cycle
+                  if (stallTries === 1) { v.play().catch(()=>{}); }
+                  else if (stallTries === 2) { forceRestartLoad(ct); }
+                  else if (stallTries === 3) { nudgeForward(); }
+                  else if (stallTries === 4) { softRecover(); }
+                  else if (stallTries >= 5) {
+                    const noNewFrags = (performance.now() - lastFragTs) > 8000; hardRecoverTries++;
+                    if (noNewFrags && hardRecoverTries >= 2) { hardReload(); }
+                    else { forceRestartLoad(ct); }
+                    if (hardRecoverTries > 6) hardRecoverTries = 6; stallTries = 0;
                   }
                 } else {
-                  // Buffer présent mais pas de progression -> possible freeze décodage
-                  // Réessayer play et petit nudge avant décisions lourdes
-                  if (stallTries % 120 === 0) { // pas spam (120 frames ~2s)
-                    v.play().catch(()=>{}); nudgeForward();
-                  }
+                  if (stallTries % 120 === 0) { v.play().catch(()=>{}); nudgeForward(); }
                 }
               }
             }
             requestAnimationFrame(watchdog);
-          };
-          requestAnimationFrame(watchdog);
-
-          const interval = setInterval(() => {
-            if (!videoProxyRef.current || videoProxyRef.current.paused) return;
-            const bufferLen = getBufferLen();
-            // Pas de fragment récemment ET buffer faible -> restart gentille
-            if (performance.now() - lastFragTs > 7000 && bufferLen < 0.4) {
-              forceRestartLoad(videoProxyRef.current.currentTime);
-            }
-          }, 4000);
-
+          }; requestAnimationFrame(watchdog);
+          const interval = setInterval(() => { if (!videoProxyRef.current || videoProxyRef.current.paused) return; const bufferLen = getBufferLen(); if (performance.now() - lastFragTs > 7000 && bufferLen < 0.4) { forceRestartLoad(videoProxyRef.current.currentTime); } }, 4000);
           hls.on(H.Events.FRAG_LOADED, () => { lastFragTs = performance.now(); });
           hls.on(H.Events.MANIFEST_PARSED, () => {
-            if (!cinemaPaused) {
-              try {
-                if (firstManifest) { // forcer départ début pseudo-VOD
-                  el.currentTime = 0;
-                  firstManifest = false;
-                }
-                const attemptPlay = () => {
-                  el.play().then(() => {
-                    // succès lecture (peut être désmuté si autorisé)
-                    if (!el.muted && !cinemaAudioOn) setCinemaAudioOn(true);
-                  }).catch(err => {
-                    if ((err && (err.name === 'NotAllowedError' || err.name === 'NotSupportedError')) || /autoplay/i.test(err?.message||'')) {
-                      console.warn('[Cinéma] Autoplay bloqué, retry en mute');
-                      el.muted = true;
-                      el.play().then(() => {
-                        setCinemaAudioOn(false); // audio pas encore actif
-                      }).catch(()=>{});
-                    }
-                  });
-                };
+            try {
+              if (firstManifest) { el.currentTime = 0; firstManifest = false; }
+              // Jouer seulement si l'utilisateur a cliqué Play (pas d'autoplay)
+              if (cinemaUserStartedRef.current && !cinemaPaused) {
+                const attemptPlay = () => { el.play().catch(err => { console.warn('[Cinéma] retry play', err?.name || err); setTimeout(() => { if (cinemaUserStartedRef.current) el.play().catch(()=>{}); }, 400); }); };
                 attemptPlay();
-              } catch {}
-            }
+              }
+            } catch {}
           });
           hls.on(H.Events.ERROR, (_e: any, data: any) => {
-            // Nouveau: détection 404 manifest/segment et stratégie de reprise
             if (data?.response?.code === 404) {
               const isManifest = data.details?.includes('manifest') || data.details === 'levelLoadError';
-              (hls as any)._notFoundCount = ((hls as any)._notFoundCount || 0) + 1;
-              const nf = (hls as any)._notFoundCount;
+              (hls as any)._notFoundCount = ((hls as any)._notFoundCount || 0) + 1; const nf = (hls as any)._notFoundCount;
               console.warn('[HLS] 404 détecté', data.details, 'count=', nf);
               if (isManifest) {
-                if (nf <= 3) {
-                  // Tentatives rapides de recharger la playlist
-                  setTimeout(() => {
-                    try { hls.loadSource(full); hls.startLoad(videoProxyRef.current?.currentTime); } catch {}
-                  }, 400 * nf);
-                  return; // ne pas tomber dans escalade générale
-                } else {
-                  // Considérer la session expirée -> arrêt propre
-                  console.warn('[HLS] Abandon session après 404 manifest répétés');
-                  stopCinemaStream();
-                  return;
-                }
-              } else {
-                // segment 404 : tenter restart ciblé
-                if (nf <= 5) {
-                  setTimeout(() => forceRestartLoad(videoProxyRef.current?.currentTime), 200);
-                  return;
-                }
-              }
-            }
-            if (data.details === 'bufferStalledError') {
-              // watchdog s'en occupe
+                if (nf <= 3) { setTimeout(() => { try { hls.loadSource(full); hls.startLoad(videoProxyRef.current?.currentTime); } catch {} }, 400 * nf); return; }
+                else { console.warn('[HLS] Abandon session après 404 manifest répétés'); stopCinemaStream(); return; }
+              } else { if (nf <= 5) { setTimeout(() => forceRestartLoad(videoProxyRef.current?.currentTime), 200); return; } }
             }
             if (data.details === 'fragParsingError') {
-              // Compter les occurrences et appliquer une escalade douce
-              (hls as any)._fragParseErrCount = ((hls as any)._fragParseErrCount || 0) + 1;
-              const c = (hls as any)._fragParseErrCount;
-              if (c === 2) {
-                // restart simple
-                forceRestartLoad(videoProxyRef.current?.currentTime);
-              } else if (c === 3) {
-                softRecover();
-              } else if (c >= 4 && c < 7) {
-                // nudge + restart
-                nudgeForward();
-                forceRestartLoad(videoProxyRef.current?.currentTime);
-              } else if (c >= 7) {
-                // hard reload (cooldown déjà géré)
-                hardReload();
-                (hls as any)._fragParseErrCount = 0; // reset après escalade
-              }
+              (hls as any)._fragParseErrCount = ((hls as any)._fragParseErrCount || 0) + 1; const c = (hls as any)._fragParseErrCount;
+              if (c === 2) forceRestartLoad(videoProxyRef.current?.currentTime);
+              else if (c === 3) softRecover();
+              else if (c >= 4 && c < 7) { nudgeForward(); forceRestartLoad(videoProxyRef.current?.currentTime); }
+              else if (c >= 7) { hardReload(); (hls as any)._fragParseErrCount = 0; }
             }
-            if (data.fatal) {
-              if (data.type === 'mediaError') { try { hls.recoverMediaError(); } catch {} }
-              else if (data.type === 'networkError') { forceRestartLoad(); }
-            }
+            if (data.fatal) { if (data.type === 'mediaError') { try { hls.recoverMediaError(); } catch {} } else if (data.type === 'networkError') { forceRestartLoad(); } }
             console.warn('HLS error', data);
           });
           hls.on(H.Events.DESTROYING, () => { clearInterval(interval); });
         } else if (el.canPlayType('application/vnd.apple.mpegurl')) {
-          el.src = full;
-          el.play().catch(()=>{});
-        } else {
-          el.src = full;
-          el.play().catch(()=>{});
-        }
+          el.src = full; // Pas de play ici (attente clic)
+        } else { el.src = full; }
       }, 1200);
     } catch (e) { console.warn(e); }
   };
@@ -802,6 +703,7 @@ export default function Room() {
     setCinemaAudioOn(false);
     setMicMutedDuringCinema(false);
     setCinemaPaused(false);
+    setCinemaUserStarted(false); cinemaUserStartedRef.current = false;
     hlsRef.current = null;
     setCinemaSession(null);
   };
@@ -828,6 +730,7 @@ export default function Room() {
     try { hlsRef.current?.startLoad?.(); } catch {}
     videoProxyRef.current.play().catch(()=>{});
     setCinemaPaused(false);
+    if (!cinemaUserStartedRef.current) { setCinemaUserStarted(true); cinemaUserStartedRef.current = true; }
   };
 
   const [currentVideoId, setCurrentVideoId] = useState<string | null>(null);
@@ -848,7 +751,20 @@ export default function Room() {
       {/* Scène 3D cinéma en arrière-plan */}
       {cinemaMode && (
         <div className="absolute inset-0 z-0 bg-black">
-          <CinemaScene mainVideoEl={cinemaSession ? videoProxyRef.current : remoteVideoRef.current} localVideoEl={localVideoRef.current} remoteVideoEl={remoteVideoRef.current} videoEl={(cinemaSession ? videoProxyRef.current : remoteVideoRef.current)} enabled />
+          <CinemaScene
+            mainVideoEl={cinemaSession ? videoProxyRef.current : remoteVideoRef.current}
+            localVideoEl={localVideoRef.current}
+            remoteVideoEl={remoteVideoRef.current}
+            videoEl={(cinemaSession ? videoProxyRef.current : remoteVideoRef.current)}
+            enabled
+            showPlayOverlay={!!cinemaSession && !cinemaUserStarted}
+            onPlayClick={() => {
+              const el = videoProxyRef.current; if (!el) return;
+              cinemaUserStartedRef.current = true; setCinemaUserStarted(true);
+              el.muted = false;
+              el.play().then(()=>{ setCinemaAudioOn(true); setCinemaPaused(false); }).catch(()=>{ setTimeout(()=>{ el.play().catch(()=>{}); }, 250); });
+            }}
+          />
         </div>
       )}
       {/* Overlay statut */}
@@ -889,9 +805,9 @@ export default function Room() {
             <button onClick={() => setCinemaMode(m => !m)} className="px-2 py-1 rounded bg-purple-600 hover:bg-purple-500">{cinemaMode ? '2D' : 'Cinéma'}</button>
             {!cinemaSession && <button onClick={startCinemaStream} className="px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-500">Projeter</button>}
             {cinemaSession && <button onClick={stopCinemaStream} className="px-2 py-1 rounded bg-red-600 hover:bg-red-500">Stop</button>}
-            {cinemaSession && !cinemaPaused && <button onClick={pauseCinema} className="px-2 py-1 rounded bg-orange-600 hover:bg-orange-500">Pause</button>}
-            {cinemaSession && cinemaPaused && <button onClick={playCinema} className="px-2 py-1 rounded bg-green-700 hover:bg-green-600">Lecture</button>}
-            {cinemaSession && !cinemaAudioOn && <button onClick={enableCinemaAudio} className="px-2 py-1 rounded bg-blue-600 hover:bg-blue-500">Son</button>}
+            {cinemaSession && cinemaUserStarted && !cinemaPaused && <button onClick={pauseCinema} className="px-2 py-1 rounded bg-orange-600 hover:bg-orange-500">Pause</button>}
+            {cinemaSession && cinemaUserStarted && cinemaPaused && <button onClick={playCinema} className="px-2 py-1 rounded bg-green-700 hover:bg-green-600">Lecture</button>}
+            {/* Son button removed (lecture démarre avec son) */}
             {cinemaSession && cinemaAudioOn && <button onClick={toggleMicMuteCinema} className="px-2 py-1 rounded bg-slate-600 hover:bg-slate-500">{micMutedDuringCinema ? 'Mic On' : 'Mic Off'}</button>}
           </div>
           <div className="flex items-center gap-2 text-neutral-400 font-mono"><span>{fmt(ytState.current)}</span><span>/</span><span>{fmt(ytState.duration)}</span></div>
@@ -923,7 +839,7 @@ export default function Room() {
           )}
         </div>
       </div>
-      <video ref={videoProxyRef} autoPlay playsInline muted className="hidden" />
+      <video ref={videoProxyRef} playsInline /* pas d'autoplay ni muted attributs => contrôle manuel */ className="hidden" />
       <div ref={youtubeContainerRef} className={(cinemaMode || showYTDebug) ? "absolute bottom-24 right-4 w-80 h-48 bg-black/80 border border-purple-500 rounded overflow-hidden z-50" : "w-0 h-0 overflow-hidden"} />
     </main>
   );
