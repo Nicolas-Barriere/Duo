@@ -13,6 +13,7 @@ interface CinemaProps {
   showPlayOverlay?: boolean; // new
   onPlayClick?: () => void;   // new
   onPlayPauseHotkey?: () => void; // new hotkey callback
+  ambientEnabled?: boolean; // NEW
 }
 
 // Reusable hook to build a video texture when ready
@@ -241,27 +242,122 @@ function CameraMover({ primaryVideo, onPlayPauseHotkey }: { primaryVideo?: HTMLV
   return null;
 }
 
-export function CinemaScene({ videoEl, enabled = true, mainVideoEl, localVideoEl, remoteVideoEl, showPlayOverlay, onPlayClick, onPlayPauseHotkey }: CinemaProps) {
+// Hook: sample average video color (downscaled) with smoothing
+function useAmbientVideoLight(videoEl: HTMLVideoElement | null, enabled: boolean, fps: number = 10) {
+  const [col, setCol] = useState<[number, number, number]>([0.35, 0.35, 0.38]);
+  const lastRef = useRef(col);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const blockedRef = useRef(false);
+  useEffect(() => {
+    if (!enabled) return;
+    if (!canvasRef.current) {
+      canvasRef.current = document.createElement('canvas');
+      canvasRef.current.width = 48; // small sample size
+      canvasRef.current.height = 27;
+    }
+    let raf: number; let lastTs = 0; const interval = 1000 / fps;
+    const sample = (ts: number) => {
+      raf = requestAnimationFrame(sample);
+      if (ts - lastTs < interval) return; lastTs = ts;
+      const v = videoEl;
+      if (!v || v.readyState < 2 || blockedRef.current) return;
+      const cvs = canvasRef.current!; const ctx = cvs.getContext('2d', { willReadFrequently: true }); if (!ctx) return;
+      try {
+        ctx.drawImage(v, 0, 0, cvs.width, cvs.height);
+        const data = ctx.getImageData(0, 0, cvs.width, cvs.height).data;
+        let rl=0, gl=0, bl=0, count=0;
+        // stride 2 pixels -> skip every other pixel
+        for (let i=0; i<data.length; i+=4*2) {
+          const r = data[i]/255, g = data[i+1]/255, b = data[i+2]/255;
+          // convert to linear
+            const lin = (c:number)=> c<=0.04045? c/12.92: Math.pow((c+0.055)/1.055,2.4);
+          rl += lin(r); gl += lin(g); bl += lin(b); count++;
+        }
+        if (!count) return;
+        rl/=count; gl/=count; bl/=count;
+        // back to sRGB
+        const toSRGB = (c:number)=> c<=0.0031308? c*12.92: 1.055*Math.pow(c,1/2.4)-0.055;
+        let r = toSRGB(rl), g = toSRGB(gl), b = toSRGB(bl);
+        // normalize mild brightness (avoid too dark)
+        const luma = 0.2126*r+0.7152*g+0.0722*b;
+        const targetLuma = 0.22; // baseline
+        if (luma < targetLuma && luma>0) {
+          const gain = targetLuma / luma * 0.6 + 0.4; // compress
+          r = Math.min(1, r*gain); g = Math.min(1, g*gain); b = Math.min(1, b*gain);
+        }
+        const last = lastRef.current; const alpha = 0.18;
+        const nr: [number, number, number] = [
+          last[0] + (r-last[0])*alpha,
+          last[1] + (g-last[1])*alpha,
+          last[2] + (b-last[2])*alpha,
+        ];
+        lastRef.current = nr;
+        setCol(nr);
+      } catch {
+        // Likely CORS; disable further attempts
+        blockedRef.current = true;
+      }
+    };
+    raf = requestAnimationFrame(sample);
+    return () => cancelAnimationFrame(raf);
+  }, [videoEl, enabled, fps]);
+  return col;
+}
+
+export function CinemaScene({ videoEl, enabled = true, mainVideoEl, localVideoEl, remoteVideoEl, showPlayOverlay, onPlayClick, onPlayPauseHotkey, ambientEnabled = true }: CinemaProps) {
   if (!enabled) return null;
   const primary = mainVideoEl !== undefined ? mainVideoEl : videoEl; // fallback
+  const avg = useAmbientVideoLight(primary || null, ambientEnabled, 9);
+  const ambientRef = useRef<THREE.AmbientLight>(null!);
+  const dirRef = useRef<THREE.DirectionalLight>(null!);
+  const hemiRef = useRef<THREE.HemisphereLight>(null!); // NEW ceiling ambience
+  // NEW vivid color derivation (boost saturation & controlled lightness)
+  const vivid = useMemo(() => {
+    const base = new THREE.Color(avg[0], avg[1], avg[2]);
+    const hsl = { h: 0, s: 0, l: 0 } as THREE.HSL;
+    base.getHSL(hsl);
+    hsl.s = Math.min(1, hsl.s * 1.7 + 0.05);
+    hsl.l = Math.min(0.62, hsl.l * 1.05 + 0.015);
+    return new THREE.Color().setHSL(hsl.h, hsl.s, hsl.l);
+  }, [avg[0], avg[1], avg[2]]);
+  const bg = useMemo(() => vivid.clone().multiplyScalar(0.20), [vivid]);
+  useEffect(() => {
+    if (ambientRef.current) ambientRef.current.color.lerp(vivid, 0.5);
+    if (dirRef.current) {
+      const mix = vivid.clone().lerp(new THREE.Color('#ffffff'), 0.15);
+      dirRef.current.color.lerp(mix, 0.35);
+      dirRef.current.intensity = 1.15;
+    }
+    if (hemiRef.current) {
+      // sky gets vivid, ground a dim desaturated version
+      const ground = vivid.clone().lerp(new THREE.Color('#050505'), 0.85).multiplyScalar(0.35);
+      hemiRef.current.color.lerp(vivid, 0.4);
+      hemiRef.current.groundColor?.lerp(ground, 0.5);
+    }
+  }, [vivid]);
   return (
     <div className="absolute inset-0 pointer-events-auto select-none" style={{ zIndex: 5 }}>
       <Canvas shadows camera={{ position: [0, 1.6, 3.5], fov: 55 }}>
-        <color attach="background" args={["#000"]} />
-        <fog attach="fog" args={["#000", 4, 18]} />
-        <ambientLight intensity={0.35} />
-        <directionalLight position={[4, 6, 4]} intensity={1} castShadow shadow-mapSize-width={1024} shadow-mapSize-height={1024} />
+        <color attach="background" args={[bg]} />
+        <fog attach="fog" args={[bg.getStyle(), 4, 18]} />
+        <ambientLight ref={ambientRef} intensity={0.75} color={vivid} />
+        <hemisphereLight ref={hemiRef} args={[vivid, vivid.clone().multiplyScalar(0.15), 0.9]} position={[0,5,-1]} />
+        <directionalLight ref={dirRef} position={[4, 6, 4]} intensity={1.15} castShadow shadow-mapSize-width={1024} shadow-mapSize-height={1024} />
+        {/* Stronger glow behind screen using vivid hue */}
+        <mesh position={[0,1.5,-4.22]}> <planeGeometry args={[3.9,2.35]} /> <meshBasicMaterial color={vivid.clone().multiplyScalar(0.55)} /> </mesh>
+        {/* Subtle emissive ceiling panel for top ambience */}
+        <mesh position={[0,4.97,-1]} rotation={[Math.PI/2,0,0]}> <planeGeometry args={[14,14]} /> <meshBasicMaterial color={vivid.clone().multiplyScalar(0.4)} transparent opacity={0.33} /> </mesh>
         <MainScreen videoEl={primary} showPlayOverlay={showPlayOverlay} onPlayClick={onPlayClick} />
-        {/* Participant video panels au-dessus de l'écran */}
         <VideoPanel videoEl={localVideoEl || null} position={[-1, 2.95, -4]} rotation={[0, 0, 0]} label="Moi" />
         <VideoPanel videoEl={remoteVideoEl || null} position={[1, 2.95, -4]} rotation={[0, 0, 0]} label="Remote" />
         <Seats />
         <RoomDeco />
-        <Environment preset="city" />
         <CameraRig />
         <CameraMover primaryVideo={primary} onPlayPauseHotkey={onPlayPauseHotkey} />
       </Canvas>
-      <div className="absolute top-2 left-1/2 -translate-x-1/2 text-[10px] text-neutral-500 bg-black/30 px-2 py-1 rounded pointer-events-none">Clique pour entrer/sortir FPV • WASD / Flèches pour bouger • Souris pour regarder • P: Play/Pause • C: Center • Esc aussi pour sortir.</div>
+      <div className="absolute top-2 left-1/2 -translate-x-1/2 text-[10px] text-neutral-300/90 bg-black/45 px-2 py-1 rounded pointer-events-none">
+        Clique pour FPV • WASD / Flèches • P: Play/Pause • C: Center • Esc: Quit • Ambilight {ambientEnabled? 'ON':'OFF'}
+      </div>
     </div>
   );
 }
