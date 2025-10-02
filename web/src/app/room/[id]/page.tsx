@@ -264,7 +264,6 @@ export default function Room() {
   const playCinema = () => { const el = videoProxyRef.current; if (!el) return; hlsRef.current?.startLoad?.(); el.play().catch(()=>{}); if (!cinemaUserStartedRef.current){ cinemaUserStartedRef.current=true; setCinemaUserStarted(true);} setCinemaPaused(false); safeSend({ type:'cinema', data:{ action:'play', t: el.currentTime, origin:selfIdRef.current } }); };
   const pauseCinema = () => { const el = videoProxyRef.current; if (!el) return; el.pause(); hlsRef.current?.stopLoad?.(); setCinemaPaused(true); safeSend({ type:'cinema', data:{ action:'pause', t: el.currentTime, origin:selfIdRef.current } }); };
   const enableCinemaAudio = () => { const el = videoProxyRef.current; if (!el) return; el.muted=false; el.play().catch(()=>{}); setCinemaAudioOn(true); };
-  const toggleMicMuteCinema = () => { const mute = !micMutedDuringCinema; localStreamRef.current?.getAudioTracks().forEach(t => t.enabled = !mute); setMicMutedDuringCinema(mute); };
 
   const handleCinemaMessage = async (data: CinemaMsg) => {
     if (data.origin === selfIdRef.current) return; const el = videoProxyRef.current;
@@ -352,9 +351,9 @@ export default function Room() {
         <div data-rs="true" onPointerDown={startResize} className="absolute bottom-0 right-0 w-5 h-5 cursor-se-resize" style={{ touchAction:'none' }} />
       </div>
 
-      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-50 bg-black/75 backdrop-blur-xl ring-1 ring-purple-500/30 rounded-lg px-4 py-3 text-[11px] text-white flex flex-col gap-2 w-[700px] pointer-events-auto shadow-[0_0_0_1px_rgba(255,255,255,0.04),0_4px_18px_-2px_rgba(0,0,0,0.6)]">
+      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-50 bg-black/75 backdrop-blur-xl ring-1 ring-purple-500/30 rounded-lg px-4 py-3 text-[11px] text-white flex flex-col gap-2 w-[640px] pointer-events-auto shadow-[0_0_0_1px_rgba(255,255,255,0.04),0_4px_18px_-2px_rgba(0,0,0,0.6)]">
         <div className="flex items-center justify-between gap-4">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <button onClick={() => setCinemaMode(m=>!m)} className="px-2.5 py-1 rounded-md bg-gradient-to-br from-fuchsia-600 to-purple-600 hover:from-fuchsia-500 hover:to-purple-500 font-medium shadow focus:outline-none focus:ring-2 focus:ring-fuchsia-400/60">{cinemaMode ? '2D' : 'Cinéma'}</button>
             <button onClick={() => setAmbientEnabled(a=>!a)} className={`px-2.5 py-1 rounded-md font-medium shadow focus:outline-none focus:ring-2 focus:ring-pink-400/50 ${ambientEnabled? 'bg-gradient-to-br from-pink-600 to-rose-600 hover:from-pink-500 hover:to-rose-500':'bg-gradient-to-br from-pink-950 to-neutral-900 text-pink-200 hover:from-pink-900 hover:to-neutral-800 ring-1 ring-pink-700/40'}`}>{ambientEnabled? 'Ambi Off':'Ambi On'}</button>
             {!cinemaSession && <button onClick={startCinemaStream} className="px-2.5 py-1 rounded-md bg-gradient-to-br from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 font-medium shadow focus:outline-none focus:ring-2 focus:ring-emerald-400/60">Projeter</button>}
@@ -362,26 +361,17 @@ export default function Room() {
             {cinemaSession && cinemaUserStarted && !cinemaPaused && <button onClick={pauseCinema} className="px-2.5 py-1 rounded-md bg-gradient-to-br from-orange-600 to-amber-600 hover:from-orange-500 hover:to-amber-500 font-medium shadow focus:outline-none focus:ring-2 focus:ring-amber-400/60">Pause</button>}
             {cinemaSession && cinemaUserStarted && cinemaPaused && <button onClick={playCinema} className="px-2.5 py-1 rounded-md bg-gradient-to-br from-green-600 to-emerald-600 hover:from-green-500 hover:to-emerald-500 font-medium shadow focus:outline-none focus:ring-2 focus:ring-emerald-400/60">Lecture</button>}
             {cinemaSession && !cinemaAudioOn && <button onClick={enableCinemaAudio} className="px-2.5 py-1 rounded-md bg-gradient-to-br from-sky-600 to-blue-600 hover:from-sky-500 hover:to-blue-500 font-medium shadow focus:outline-none focus:ring-2 focus:ring-sky-400/60">Son</button>}
-            {cinemaSession && cinemaAudioOn && <button onClick={toggleMicMuteCinema} className="px-2.5 py-1 rounded-md bg-gradient-to-br from-slate-600 to-slate-700 hover:from-slate-500 hover:to-slate-600 font-medium shadow focus:outline-none focus:ring-2 focus:ring-slate-300/40">{micMutedDuringCinema ? 'Mic On' : 'Mic Off'}</button>}
-          </div>
-          <div className="flex items-center gap-2 text-fuchsia-200 font-mono"><span>{fmtTime(ytState.current)}</span><span className="text-fuchsia-500/60">/</span><span>{fmtTime(ytState.duration)}</span></div>
-          <div className="flex items-center gap-2">
-            <button onClick={() => ytSeek(-10)} className="px-2.5 py-1 bg-slate-800/80 hover:bg-slate-700 rounded-md text-[11px]">-10s</button>
-            <button onClick={() => ytSeek(10)} className="px-2.5 py-1 bg-slate-800/80 hover:bg-slate-700 rounded-md text-[11px]">+10s</button>
-            <button onClick={() => ytSetRate(Math.max(0.25, Math.min(ytState.rate - 0.25, 2))) } className="px-2.5 py-1 bg-slate-800/80 hover:bg-slate-700 rounded-md text-[11px]">-0.25</button>
-            <span className="w-10 text-center text-xs font-semibold text-purple-300">{ytState.rate.toFixed(2)}x</span>
-            <button onClick={() => ytSetRate(Math.max(0.25, Math.min(ytState.rate + 0.25, 2))) } className="px-2.5 py-1 bg-slate-800/80 hover:bg-slate-700 rounded-md text-[11px]">+0.25</button>
-            <button onClick={() => setShowYTDebug(d=>!d)} className="px-2.5 py-1 rounded-md bg-slate-900/80 hover:bg-slate-800 text-[11px] border border-slate-700/60">{showYTDebug ? 'YT Hide' : 'YT Debug'}</button>
+            {/* Removed mic toggle, YT debug, speed buttons, load button */}
           </div>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 w-full">
           <button onClick={ytTogglePlay} className="px-3 py-1.5 rounded-md bg-gradient-to-r from-green-600 via-emerald-600 to-teal-600 hover:from-green-500 hover:via-emerald-500 hover:to-teal-500 font-semibold text-[11px] shadow focus:outline-none focus:ring-2 focus:ring-emerald-400/60">{ytState.playing ? 'Pause' : 'Lecture'}</button>
-          <input ref={progressRef} type="range" min={0} max={1000} defaultValue={0} className="flex-1 accent-fuchsia-500/90 [--tw-thumb-size:12px]" onChange={e => { const p = ytPlayerRef.current; if (!p) return; const d = p.getDuration?.() || ytState.duration || 0; if (!d) return; const ratio=parseFloat(e.target.value)/1000; const nt=d*ratio; if(!isFinite(nt)) return; p.seekTo(nt,true); safeSend({ type:'yt', data:{ action:'seek', time:nt, origin:selfIdRef.current } }); }} />
-          <button onClick={() => ytLoad(prompt('ID YouTube:')?.trim() || '')} className="px-2.5 py-1 rounded-md bg-gradient-to-br from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 font-medium">Load</button>
+          <input ref={progressRef} type="range" min={0} max={1000} defaultValue={0} className="flex-1 accent-fuchsia-500/90" onChange={e => { const p = ytPlayerRef.current; if (!p) return; const d = p.getDuration?.() || ytState.duration || 0; if (!d) return; const ratio=parseFloat(e.target.value)/1000; const nt=d*ratio; if(!isFinite(nt)) return; p.seekTo(nt,true); safeSend({ type:'yt', data:{ action:'seek', time:nt, origin:selfIdRef.current } }); }} />
+          <div className="flex items-center gap-1 text-fuchsia-200 font-mono whitespace-nowrap w-[86px] justify-end"><span>{fmtTime(ytState.current)}</span><span className="text-fuchsia-500/60">/</span><span>{fmtTime(ytState.duration)}</span></div>
           {cinemaSession && cinemaAudioOn && (
-            <div className="flex items-center gap-1 text-[10px] text-sky-200/90">
+            <div className="flex items-center gap-1 text-[10px] text-sky-200/90 w-28">
               <span className="uppercase tracking-wide">Vol</span>
-              <input type="range" min={0} max={1} step={0.01} defaultValue={1} className="accent-sky-400/90" onChange={e => { if (videoProxyRef.current) videoProxyRef.current.volume = parseFloat(e.target.value); }} />
+              <input type="range" min={0} max={1} step={0.01} defaultValue={1} className="accent-sky-400/90 flex-1" onChange={e => { if (videoProxyRef.current) videoProxyRef.current.volume = parseFloat(e.target.value); }} />
             </div>
           )}
         </div>

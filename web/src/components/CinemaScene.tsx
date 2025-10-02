@@ -47,18 +47,14 @@ function useVideoTexture(videoEl: HTMLVideoElement | null) {
 function MainScreen({ videoEl, showPlayOverlay, onPlayClick }: { videoEl: HTMLVideoElement | null; showPlayOverlay?: boolean; onPlayClick?: () => void }) {
   const texture = useVideoTexture(videoEl);
   return (
-    <mesh position={[0, 1.5, -4]}>
-      <planeGeometry args={[3.2, 1.8]} />
-      {texture ? (
-        <meshBasicMaterial map={texture} toneMapped={false} />
-      ) : (
-        <meshBasicMaterial color="#050505" />
-      )}
+    <mesh position={[0, 2.2, -4]}> {/* raised center (was 1.5) so bottom now above floor */}
+      <planeGeometry args={[6.4, 3.6]} />
+      {texture ? <meshBasicMaterial map={texture} toneMapped={false} /> : <meshBasicMaterial color="#050505" />}
       {showPlayOverlay && (
         <Html center transform zIndexRange={[10, 20]}>
           <button
             onClick={(e) => { e.stopPropagation(); onPlayClick && onPlayClick(); }}
-            className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 border border-white/30 backdrop-blur text-white text-base flex items-center justify-center shadow-xl transition"
+            className="w-12 h-12 rounded-full bg-white/10 hover:bg-white/20 border border-white/30 backdrop-blur text-white text-xl flex items-center justify-center shadow-xl transition"
             style={{ cursor: 'pointer' }}
           >▶</button>
         </Html>
@@ -110,27 +106,18 @@ function Seats() {
 function RoomDeco() {
   return (
     <group>
-      {/* Floor */}
+      {/* Floor unchanged */}
       <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
         <planeGeometry args={[20, 20]} />
         <meshStandardMaterial color="#111" />
       </mesh>
-      {/* Back wall behind screen */}
-      <mesh position={[0, 1.5, -4.05]}>
-        <planeGeometry args={[3.4, 2]} />
+      {/* Back wall behind raised screen */}
+      <mesh position={[0, 2.2, -4.05]}> {/* was y=1.5 */}
+        <planeGeometry args={[6.8, 3.9]} />
         <meshStandardMaterial color="#050505" />
       </mesh>
-      {/* Side walls */}
-      <mesh position={[ -5, 2.5, -1]} rotation={[0, Math.PI / 2, 0]}>
-        <planeGeometry args={[8, 5]} />
-        <meshStandardMaterial color="#101010" />
-      </mesh>
-      <mesh position={[ 5, 2.5, -1]} rotation={[0, -Math.PI / 2, 0]}>
-        <planeGeometry args={[8, 5]} />
-        <meshStandardMaterial color="#101010" />
-      </mesh>
-      {/* Ceiling */}
-      <mesh position={[0, 5, -1]} rotation={[Math.PI / 2, 0, 0]}>
+      {/* Ceiling raised */}
+      <mesh position={[0, 5.8, -1]} rotation={[Math.PI / 2, 0, 0]}>
         <planeGeometry args={[20, 20]} />
         <meshStandardMaterial color="#0d0d0d" />
       </mesh>
@@ -173,11 +160,10 @@ function CameraMover({ primaryVideo, onPlayPauseHotkey }: { primaryVideo?: HTMLV
       }
       if (e.code === 'KeyC') {
         e.preventDefault();
-        // Position recentrée encore plus proche de l'écran (écran à z=-4)
-        camera.position.set(0, 1.6, -0.8); // avant: 0.7
+        camera.position.set(0, 1.9, -0.8); // slightly higher to face raised screen
         yawRef.current = 0; pitchRef.current = 0;
         camera.rotation.set(0,0,0,'YXZ');
-        camera.lookAt(0,1.5,-4);
+        camera.lookAt(0,2.2,-4); // new screen center
         return;
       }
       keys.current[e.code] = true;
@@ -337,19 +323,20 @@ export function CinemaScene({ videoEl, enabled = true, mainVideoEl, localVideoEl
   }, [vivid]);
   return (
     <div className="absolute inset-0 pointer-events-auto select-none" style={{ zIndex: 5 }}>
-      <Canvas shadows camera={{ position: [0, 1.6, 3.5], fov: 55 }}>
+      <Canvas shadows camera={{ position: [0, 1.8, 4.8], fov: 60 }}> {/* camera slightly higher */}
         <color attach="background" args={[bg]} />
-        <fog attach="fog" args={[bg.getStyle(), 4, 18]} />
+        <fog attach="fog" args={[bg.getStyle(), 5, 22]} />
         <ambientLight ref={ambientRef} intensity={0.75} color={vivid} />
-        <hemisphereLight ref={hemiRef} args={[vivid, vivid.clone().multiplyScalar(0.15), 0.9]} position={[0,5,-1]} />
-        <directionalLight ref={dirRef} position={[4, 6, 4]} intensity={1.15} castShadow shadow-mapSize-width={1024} shadow-mapSize-height={1024} />
-        {/* Stronger glow behind screen using vivid hue */}
-        <mesh position={[0,1.5,-4.22]}> <planeGeometry args={[3.9,2.35]} /> <meshBasicMaterial color={vivid.clone().multiplyScalar(0.55)} /> </mesh>
-        {/* Subtle emissive ceiling panel for top ambience */}
-        <mesh position={[0,4.97,-1]} rotation={[Math.PI/2,0,0]}> <planeGeometry args={[14,14]} /> <meshBasicMaterial color={vivid.clone().multiplyScalar(0.4)} transparent opacity={0.33} /> </mesh>
+        <hemisphereLight ref={hemiRef} args={[vivid, vivid.clone().multiplyScalar(0.15), 0.9]} position={[0,5.8,-1]} />
+        <directionalLight ref={dirRef} position={[4, 6.5, 4]} intensity={1.15} castShadow shadow-mapSize-width={1024} shadow-mapSize-height={1024} />
+        {/* Glow behind raised screen */}
+        <mesh position={[0,2.2,-4.22]}> <planeGeometry args={[7.9,4.5]} /> <meshBasicMaterial color={vivid.clone().multiplyScalar(0.55)} /> </mesh>
+        {/* Emissive ceiling panel raised with ceiling */}
+        <mesh position={[0,5.77,-1]} rotation={[Math.PI/2,0,0]}> <planeGeometry args={[14,14]} /> <meshBasicMaterial color={vivid.clone().multiplyScalar(0.4)} transparent opacity={0.33} /> </mesh>
         <MainScreen videoEl={primary} showPlayOverlay={showPlayOverlay} onPlayClick={onPlayClick} />
-        <VideoPanel videoEl={localVideoEl || null} position={[-1, 2.95, -4]} rotation={[0, 0, 0]} label="Moi" />
-        <VideoPanel videoEl={remoteVideoEl || null} position={[1, 2.95, -4]} rotation={[0, 0, 0]} label="Remote" />
+        {/* Participant panels lifted proportionally */}
+        <VideoPanel videoEl={localVideoEl || null} position={[-2.1, 4.3, -4]} rotation={[0, 0, 0]} label="Moi" />
+        <VideoPanel videoEl={remoteVideoEl || null} position={[2.1, 4.3, -4]} rotation={[0, 0, 0]} label="Remote" />
         <Seats />
         <RoomDeco />
         <CameraRig />
