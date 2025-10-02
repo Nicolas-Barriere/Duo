@@ -21,7 +21,8 @@ type Msg =
   | { type: "sdp"; data: RTCSessionDescriptionInit }
   | { type: "ice"; data: RTCIceCandidateInit }
   | { type: "yt"; data: YTAction & { origin: string } }
-  | { type: "cinema"; data: CinemaMsg };
+  | { type: "cinema"; data: CinemaMsg }
+  | { type: "chat"; data: { id: string; text: string; ts: number } };
 
 declare global { interface Window { YT: any; onYouTubeIframeAPIReady: () => void; } }
 
@@ -110,6 +111,7 @@ export default function Room() {
       }
       if (msg.type === 'yt') return handleYTMessage(msg.data);
       if (msg.type === 'cinema') return handleCinemaMessage(msg.data);
+      if (msg.type === 'chat') { setChatMessages(m => [...m.slice(-199), msg.data]); return; }
     };
     return () => { try { ws.close(); } catch {} };
   }, [wsURL]);
@@ -282,6 +284,39 @@ export default function Room() {
   const startResize = (e: React.PointerEvent) => { e.stopPropagation(); dragRef.current.resizing=true; dragRef.current.startW=box.w; dragRef.current.startH=box.h; dragRef.current.startX=e.clientX; dragRef.current.startY=e.clientY; };
   useEffect(() => { const onMove = (e: PointerEvent) => { const d=dragRef.current; if(!d.dragging && !d.resizing) return; e.preventDefault(); if(d.dragging){ setBox(b=>({...b, x:Math.max(0,e.clientX-d.offsetX), y:Math.max(0,e.clientY-d.offsetY)})); } else if (d.resizing) { setBox(b=>({...b, w:Math.max(260,d.startW+(e.clientX-d.startX)), h:Math.max(160,d.startH+(e.clientY-d.startY))})); } }; const end = () => { dragRef.current.dragging=false; dragRef.current.resizing=false; }; window.addEventListener('pointermove', onMove); window.addEventListener('pointerup', end); return () => { window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', end); }; }, []);
 
+  /* -------- Chat -------- */
+  const [chatMessages, setChatMessages] = useState<{ id: string; text: string; ts: number }[]>([]);
+  const chatInputRef = useRef<HTMLInputElement | null>(null);
+  const chatFocusRef = useRef(false);
+  const sendChat = () => {
+    const v = chatInputRef.current?.value;
+    if (!v) return;
+    const text = v.trim();
+    if (!text) {
+      if (chatInputRef.current) chatInputRef.current.value = '';
+      return;
+    }
+    const msg = { id: selfIdRef.current, text, ts: Date.now() };
+    setChatMessages(m => [...m.slice(-199), msg]);
+    safeSend({ type: 'chat', data: msg });
+    if (chatInputRef.current) chatInputRef.current.value = '';
+  };
+  // Block global shortcuts while typing (c, p, space, etc.)
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (!chatFocusRef.current) return;
+      // stop propagation so higher-level listeners (cinema shortcuts) don't fire
+      e.stopPropagation();
+      // Enter without Shift submits
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendChat();
+      }
+    };
+    window.addEventListener('keydown', handler, true);
+    return () => window.removeEventListener('keydown', handler, true);
+  }, []);
+
   /* ============================ Render ============================ */
   return (
     <main className="w-full h-screen overflow-hidden relative select-none">
@@ -347,6 +382,42 @@ export default function Room() {
             </div>
           )}
         </div>
+      </div>
+
+      {/* Chat Panel */}
+      <div className="absolute right-4 top-4 w-72 h-[70vh] z-50 flex flex-col bg-neutral-900/85 backdrop-blur-md rounded-lg border border-neutral-700 shadow-lg">
+        <div className="px-3 py-2 flex items-center justify-between border-b border-neutral-700/70 text-[11px] uppercase tracking-wide font-semibold text-neutral-300">
+          <span>Chat</span>
+          <span className="text-[10px] font-normal text-neutral-500">{chatMessages.length}</span>
+        </div>
+        <div className="flex-1 overflow-y-auto px-3 py-2 space-y-1 scrollbar-thin" role="log" aria-live="polite">
+          {chatMessages.map(m => {
+            const own = m.id === selfIdRef.current;
+            return (
+              <div key={m.ts + m.id} className={`group rounded-md px-2 py-1 text-[12px] leading-snug break-words max-w-full ${own ? 'bg-gradient-to-r from-indigo-600/70 to-purple-600/70 text-white ml-6' : 'bg-neutral-800/70 text-neutral-200 mr-6'} shadow-sm`}>
+                <div className="flex items-center gap-2 mb-0.5">
+                  <span className={`text-[10px] font-mono ${own ? 'text-white/70' : 'text-neutral-500'}`}>{new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                  <span className={`text-[10px] font-semibold ${own ? 'text-white' : 'text-purple-400'}`}>{m.id.slice(0,4)}</span>
+                </div>
+                <span>{m.text}</span>
+              </div>
+            );
+          })}
+        </div>
+        <form onSubmit={e => { e.preventDefault(); sendChat(); }} className="p-2 flex gap-2 border-t border-neutral-700/70">
+          <input
+            ref={chatInputRef}
+            onFocus={() => { chatFocusRef.current = true; }}
+            onBlur={() => { chatFocusRef.current = false; }}
+            className="flex-1 bg-neutral-800/90 focus:bg-neutral-800 text-[12px] rounded-md px-3 py-2 outline-none border border-neutral-700 focus:border-purple-500/70 text-neutral-200 placeholder-neutral-500 transition"
+            placeholder="Message..."
+            maxLength={240}
+            autoComplete="off"
+            spellCheck={false}
+            aria-label="Message"
+          />
+          <button type="submit" className="px-3 py-2 rounded-md bg-purple-600 hover:bg-purple-500 active:bg-purple-500/90 text-[12px] font-medium text-white shadow focus:outline-none focus:ring-2 focus:ring-purple-400/50">Env</button>
+        </form>
       </div>
 
       <video ref={videoProxyRef} playsInline className="hidden" />
