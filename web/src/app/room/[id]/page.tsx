@@ -172,7 +172,35 @@ export default function Room() {
   /* -------- Cinema / HLS -------- */
   const [cinemaMode, setCinemaMode] = useState(false);
   const [ambientEnabled, setAmbientEnabled] = useState(true); // added state for adaptive ambient light toggle
-  const videoProxyRef = useRef<HTMLVideoElement | null>(null);
+  // NEW: chat visibility + draggable position
+  const [showChat, setShowChat] = useState(true);
+  const [chatPos, setChatPos] = useState({ x: 0, y: 0 });
+  const chatDragRef = useRef({ dragging:false, offsetX:0, offsetY:0, w:288, h:0 });
+  const chatInitRef = useRef(false);
+  const chatRef = useRef<HTMLDivElement | null>(null);
+  const videoProxyRef = useRef<HTMLVideoElement | null>(null); // Restored hidden cinema playback video element ref
+  // Drag logic for chat (missing previously)
+  useEffect(() => {
+    const move = (e: PointerEvent) => {
+      if (!chatDragRef.current.dragging) return;
+      e.preventDefault();
+      setChatPos(p => {
+        let nx = e.clientX - chatDragRef.current.offsetX;
+        let ny = e.clientY - chatDragRef.current.offsetY;
+        const w = chatDragRef.current.w || 288;
+        const h = chatDragRef.current.h || 400;
+        const maxX = window.innerWidth - w - 8;
+        const maxY = window.innerHeight - h - 8;
+        if (nx < 0) nx = 0; if (ny < 0) ny = 0; if (nx > maxX) nx = maxX; if (ny > maxY) ny = maxY;
+        return { x: nx, y: ny };
+      });
+    };
+    const up = () => { chatDragRef.current.dragging = false; };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    return () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
+  }, []);
+
   const [cinemaSession, setCinemaSession] = useState<{ id: string; playlist: string } | null>(null);
   const [cinemaAudioOn, setCinemaAudioOn] = useState(false);
   const [micMutedDuringCinema, setMicMutedDuringCinema] = useState(false);
@@ -351,8 +379,8 @@ export default function Room() {
         <div data-rs="true" onPointerDown={startResize} className="absolute bottom-0 right-0 w-5 h-5 cursor-se-resize" style={{ touchAction:'none' }} />
       </div>
 
-      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-50 bg-black/75 backdrop-blur-xl ring-1 ring-purple-500/30 rounded-lg px-4 py-3 text-[11px] text-white flex flex-col gap-2 w-[640px] pointer-events-auto shadow-[0_0_0_1px_rgba(255,255,255,0.04),0_4px_18px_-2px_rgba(0,0,0,0.6)]">
-        <div className="flex items-center justify-between gap-4">
+      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-50 bg-black/75 backdrop-blur-xl ring-1 ring-purple-500/30 rounded-lg px-4 py-3 text-[11px] text-white flex flex-col gap-2 w-full max-w-[680px] pointer-events-auto shadow-[0_0_0_1px_rgba(255,255,255,0.04),0_4px_18px_-2px_rgba(0,0,0,0.6)]">
+        <div className="flex items-center justify-between gap-4 flex-wrap">
           <div className="flex items-center gap-2 flex-wrap">
             <button onClick={() => setCinemaMode(m=>!m)} className="px-2.5 py-1 rounded-md bg-gradient-to-br from-fuchsia-600 to-purple-600 hover:from-fuchsia-500 hover:to-purple-500 font-medium shadow focus:outline-none focus:ring-2 focus:ring-fuchsia-400/60">{cinemaMode ? '2D' : 'Cinéma'}</button>
             <button onClick={() => setAmbientEnabled(a=>!a)} className={`px-2.5 py-1 rounded-md font-medium shadow focus:outline-none focus:ring-2 focus:ring-pink-400/50 ${ambientEnabled? 'bg-gradient-to-br from-pink-600 to-rose-600 hover:from-pink-500 hover:to-rose-500':'bg-gradient-to-br from-pink-950 to-neutral-900 text-pink-200 hover:from-pink-900 hover:to-neutral-800 ring-1 ring-pink-700/40'}`}>{ambientEnabled? 'Ambi Off':'Ambi On'}</button>
@@ -361,56 +389,75 @@ export default function Room() {
             {cinemaSession && cinemaUserStarted && !cinemaPaused && <button onClick={pauseCinema} className="px-2.5 py-1 rounded-md bg-gradient-to-br from-orange-600 to-amber-600 hover:from-orange-500 hover:to-amber-500 font-medium shadow focus:outline-none focus:ring-2 focus:ring-amber-400/60">Pause</button>}
             {cinemaSession && cinemaUserStarted && cinemaPaused && <button onClick={playCinema} className="px-2.5 py-1 rounded-md bg-gradient-to-br from-green-600 to-emerald-600 hover:from-green-500 hover:to-emerald-500 font-medium shadow focus:outline-none focus:ring-2 focus:ring-emerald-400/60">Lecture</button>}
             {cinemaSession && !cinemaAudioOn && <button onClick={enableCinemaAudio} className="px-2.5 py-1 rounded-md bg-gradient-to-br from-sky-600 to-blue-600 hover:from-sky-500 hover:to-blue-500 font-medium shadow focus:outline-none focus:ring-2 focus:ring-sky-400/60">Son</button>}
+            <button onClick={() => setShowChat(c=>!c)} className={`px-2.5 py-1 rounded-md font-medium shadow focus:outline-none focus:ring-2 ${showChat ? 'bg-gradient-to-br from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 focus:ring-indigo-400/60':'bg-gradient-to-br from-indigo-950 to-neutral-900 text-indigo-200 hover:from-indigo-900 hover:to-neutral-800 ring-1 ring-indigo-700/40 focus:ring-indigo-500/50'}`}>{showChat? 'Chat Off':'Chat On'}</button>
             {/* Removed mic toggle, YT debug, speed buttons, load button */}
           </div>
         </div>
-        <div className="flex items-center gap-3 w-full">
+        <div className="flex items-center gap-3 w-full flex-wrap min-w-0">
           <button onClick={ytTogglePlay} className="px-3 py-1.5 rounded-md bg-gradient-to-r from-green-600 via-emerald-600 to-teal-600 hover:from-green-500 hover:via-emerald-500 hover:to-teal-500 font-semibold text-[11px] shadow focus:outline-none focus:ring-2 focus:ring-emerald-400/60">{ytState.playing ? 'Pause' : 'Lecture'}</button>
-          <input ref={progressRef} type="range" min={0} max={1000} defaultValue={0} className="flex-1 accent-fuchsia-500/90" onChange={e => { const p = ytPlayerRef.current; if (!p) return; const d = p.getDuration?.() || ytState.duration || 0; if (!d) return; const ratio=parseFloat(e.target.value)/1000; const nt=d*ratio; if(!isFinite(nt)) return; p.seekTo(nt,true); safeSend({ type:'yt', data:{ action:'seek', time:nt, origin:selfIdRef.current } }); }} />
-          <div className="flex items-center gap-1 text-fuchsia-200 font-mono whitespace-nowrap w-[86px] justify-end"><span>{fmtTime(ytState.current)}</span><span className="text-fuchsia-500/60">/</span><span>{fmtTime(ytState.duration)}</span></div>
+          <input ref={progressRef} type="range" min={0} max={1000} defaultValue={0} className="flex-1 min-w-[140px] accent-fuchsia-500/90" onChange={e => { const p = ytPlayerRef.current; if (!p) return; const d = p.getDuration?.() || ytState.duration || 0; if (!d) return; const ratio=parseFloat(e.target.value)/1000; const nt=d*ratio; if(!isFinite(nt)) return; p.seekTo(nt,true); safeSend({ type:'yt', data:{ action:'seek', time:nt, origin:selfIdRef.current } }); }} />
+          <div className="flex items-center gap-1 text-fuchsia-200 font-mono whitespace-nowrap w-[86px] justify-end flex-shrink-0"><span>{fmtTime(ytState.current)}</span><span className="text-fuchsia-500/60">/</span><span>{fmtTime(ytState.duration)}</span></div>
           {cinemaSession && cinemaAudioOn && (
-            <div className="flex items-center gap-1 text-[10px] text-sky-200/90 w-28">
+            <div className="flex items-center gap-1 text-[10px] text-sky-200/90 flex-shrink-0 w-auto min-w-[96px]">
               <span className="uppercase tracking-wide">Vol</span>
-              <input type="range" min={0} max={1} step={0.01} defaultValue={1} className="accent-sky-400/90 flex-1" onChange={e => { if (videoProxyRef.current) videoProxyRef.current.volume = parseFloat(e.target.value); }} />
+              <input type="range" min={0} max={1} step={0.01} defaultValue={1} className="accent-sky-400/90 w-20" onChange={e => { if (videoProxyRef.current) videoProxyRef.current.volume = parseFloat(e.target.value); if (videoProxyRef.current && (videoProxyRef.current as any)._spatialGain) { (videoProxyRef.current as any)._spatialGain.gain.value = parseFloat(e.target.value); } }} />
             </div>
           )}
         </div>
       </div>
 
       {/* Chat Panel */}
-      <div className="absolute right-4 top-4 w-72 h-[70vh] z-50 flex flex-col bg-[linear-gradient(145deg,#0d0d12_0%,#111323_40%,#20102a_85%)] backdrop-blur-xl rounded-xl border border-purple-700/40 shadow-[0_0_0_1px_rgba(255,255,255,0.04),0_8px_28px_-4px_rgba(0,0,0,0.7)] overflow-hidden">
-        <div className="px-3 py-2 flex items-center justify-between border-b border-purple-800/50 text-[11px] uppercase tracking-wide font-semibold text-fuchsia-200 bg-purple-900/10">
-          <span>Chat</span>
-          <span className="text-[10px] font-normal text-purple-300/70">{chatMessages.length}</span>
-        </div>
-        <div className="flex-1 overflow-y-auto px-3 py-2 space-y-1 scrollbar-thin scrollbar-track-transparent scrollbar-thumb-purple-800/60 hover:scrollbar-thumb-purple-700/70" role="log" aria-live="polite">
-          {chatMessages.map(m => {
-            const own = m.id === selfIdRef.current;
-            return (
-              <div key={m.ts + m.id} className={`group rounded-lg px-2.5 py-1.5 text-[12px] leading-snug break-words max-w-full ring-1 ring-inset ${own ? 'bg-gradient-to-r from-violet-600/85 via-fuchsia-600/85 to-pink-600/85 text-white ml-6 ring-white/10' : 'bg-slate-900/70 text-slate-200 mr-6 ring-slate-500/10'} shadow-md backdrop-blur-sm`}>                <div className="flex items-center gap-2 mb-0.5">
-                  <span className={`text-[10px] font-mono ${own ? 'text-white/70' : 'text-fuchsia-300/70'}`}>{new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                  <span className={`text-[10px] font-semibold ${own ? 'text-white' : 'text-pink-400'}`}>{m.id.slice(0,4)}</span>
+      {showChat && (
+        <div
+          ref={chatRef}
+          className="fixed z-50 flex flex-col bg-[linear-gradient(145deg,#0d0d12_0%,#111323_40%,#20102a_85%)] backdrop-blur-xl rounded-xl border border-purple-700/40 shadow-[0_0_0_1px_rgba(255,255,255,0.04),0_8px_28px_-4px_rgba(0,0,0,0.7)] overflow-hidden w-72 h-[70vh]"
+          style={{ transform: `translate(${chatPos.x}px, ${chatPos.y}px)` }}
+        >
+          <div
+            onPointerDown={(e) => { 
+              if (document.pointerLockElement) document.exitPointerLock?.();
+              chatDragRef.current.dragging = true; 
+              const rect = chatRef.current?.getBoundingClientRect();
+              chatDragRef.current.w = rect?.width || 288; chatDragRef.current.h = rect?.height || 400;
+              chatDragRef.current.offsetX = e.clientX - chatPos.x; 
+              chatDragRef.current.offsetY = e.clientY - chatPos.y; 
+            }}
+            className="px-3 py-2 flex items-center justify-between border-b border-purple-800/50 text-[11px] uppercase tracking-wide font-semibold text-fuchsia-200 bg-purple-900/20 cursor-move select-none"
+            title="Glisser pour déplacer"
+          >
+            <span>Chat</span>
+            <span className="text-[10px] font-normal text-purple-300/70">{chatMessages.length}</span>
+          </div>
+          <div className="flex-1 overflow-y-auto px-3 py-2 space-y-1 scrollbar-thin scrollbar-track-transparent scrollbar-thumb-purple-800/60 hover:scrollbar-thumb-purple-700/70" role="log" aria-live="polite">
+            {chatMessages.map(m => {
+              const own = m.id === selfIdRef.current;
+              return (
+                <div key={m.ts + m.id} className={`group rounded-lg px-2.5 py-1.5 text-[12px] leading-snug break-words max-w-full ring-1 ring-inset ${own ? 'bg-gradient-to-r from-violet-600/85 via-fuchsia-600/85 to-pink-600/85 text-white ml-6 ring-white/10' : 'bg-slate-900/70 text-slate-200 mr-6 ring-slate-500/10'} shadow-md backdrop-blur-sm`}>
+                  <div className="flex items-center gap-2 mb-0.5">
+                    <span className={`text-[10px] font-mono ${own ? 'text-white/70' : 'text-fuchsia-300/70'}`}>{new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                    <span className={`text-[10px] font-semibold ${own ? 'text-white' : 'text-pink-400'}`}>{m.id.slice(0,4)}</span>
+                  </div>
+                  <span>{m.text}</span>
                 </div>
-                <span>{m.text}</span>
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
+          <form onSubmit={e => { e.preventDefault(); sendChat(); }} className="p-2 flex gap-2 border-t border-purple-800/50 bg-purple-900/10">
+            <input
+              ref={chatInputRef}
+              onFocus={() => { chatFocusRef.current = true; }}
+              onBlur={() => { chatFocusRef.current = false; }}
+              className="flex-1 bg-slate-950/70 focus:bg-slate-900/70 text-[12px] rounded-md px-3 py-2 outline-none border border-slate-700/60 focus:border-fuchsia-400/70 text-slate-200 placeholder-slate-500 transition shadow-inner"
+              placeholder="Message..."
+              maxLength={240}
+              autoComplete="off"
+              spellCheck={false}
+              aria-label="Message"
+            />
+            <button type="submit" className="px-3 py-2 rounded-md bg-gradient-to-br from-fuchsia-600 to-purple-600 hover:from-fuchsia-500 hover:to-purple-500 active:scale-[0.97] text-[12px] font-semibold text-white shadow focus:outline-none focus:ring-2 focus:ring-fuchsia-400/60">Env</button>
+          </form>
         </div>
-        <form onSubmit={e => { e.preventDefault(); sendChat(); }} className="p-2 flex gap-2 border-t border-purple-800/50 bg-purple-900/5">
-          <input
-            ref={chatInputRef}
-            onFocus={() => { chatFocusRef.current = true; }}
-            onBlur={() => { chatFocusRef.current = false; }}
-            className="flex-1 bg-slate-950/70 focus:bg-slate-900/70 text-[12px] rounded-md px-3 py-2 outline-none border border-slate-700/60 focus:border-fuchsia-400/70 text-slate-200 placeholder-slate-500 transition shadow-inner"
-            placeholder="Message..."
-            maxLength={240}
-            autoComplete="off"
-            spellCheck={false}
-            aria-label="Message"
-          />
-          <button type="submit" className="px-3 py-2 rounded-md bg-gradient-to-br from-fuchsia-600 to-purple-600 hover:from-fuchsia-500 hover:to-purple-500 active:scale-[0.97] text-[12px] font-semibold text-white shadow focus:outline-none focus:ring-2 focus:ring-fuchsia-400/60">Env</button>
-        </form>
-      </div>
+      )}
 
       <video ref={videoProxyRef} playsInline className="hidden" />
       <div ref={youtubeContainerRef} className={(cinemaMode || showYTDebug) ? "absolute bottom-24 right-4 w-80 h-48 bg-black/80 border border-purple-500 rounded overflow-hidden z-50" : "w-0 h-0 overflow-hidden"} />

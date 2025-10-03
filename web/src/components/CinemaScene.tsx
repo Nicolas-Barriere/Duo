@@ -290,6 +290,25 @@ function useAmbientVideoLight(videoEl: HTMLVideoElement | null, enabled: boolean
   return col;
 }
 
+// Helper child to update audio listener inside Canvas context
+function SpatialAudioUpdater({ ctxRef }: { ctxRef: React.MutableRefObject<AudioContext | null> }) {
+  const { camera } = useThree();
+  useFrame(() => {
+    const ctx = ctxRef.current; if (!ctx) return;
+    const listener = ctx.listener; const pos = camera.position;
+    const fwd = new THREE.Vector3(); camera.getWorldDirection(fwd);
+    const up = camera.up.clone().normalize();
+    try {
+      listener.positionX.value = pos.x; listener.positionY.value = pos.y; listener.positionZ.value = pos.z;
+      listener.forwardX.value = fwd.x; listener.forwardY.value = fwd.y; listener.forwardZ.value = fwd.z;
+      listener.upX.value = up.x; listener.upY.value = up.y; listener.upZ.value = up.z;
+    } catch {
+      try { (listener as any).setPosition(pos.x, pos.y, pos.z); (listener as any).setOrientation(fwd.x, fwd.y, fwd.z, up.x, up.y, up.z); } catch {}
+    }
+  });
+  return null;
+}
+
 export function CinemaScene({ videoEl, enabled = true, mainVideoEl, localVideoEl, remoteVideoEl, showPlayOverlay, onPlayClick, onPlayPauseHotkey, ambientEnabled = true }: CinemaProps) {
   if (!enabled) return null;
   const primary = mainVideoEl !== undefined ? mainVideoEl : videoEl; // fallback
@@ -315,12 +334,62 @@ export function CinemaScene({ videoEl, enabled = true, mainVideoEl, localVideoEl
       dirRef.current.intensity = 1.15;
     }
     if (hemiRef.current) {
-      // sky gets vivid, ground a dim desaturated version
       const ground = vivid.clone().lerp(new THREE.Color('#050505'), 0.85).multiplyScalar(0.35);
       hemiRef.current.color.lerp(vivid, 0.4);
       hemiRef.current.groundColor?.lerp(ground, 0.5);
     }
   }, [vivid]);
+
+  /* -------- Spatial Audio (screen audio from main screen) -------- */
+  const spatialCtxRef = useRef<AudioContext | null>(null);
+  const screenPannerRef = useRef<PannerNode | null>(null);
+  const screenGainRef = useRef<GainNode | null>(null);
+  useEffect(() => {
+    const vid = primary; if (!vid) return;
+    if (!spatialCtxRef.current) {
+      try { spatialCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)(); } catch { return; }
+      const resume = () => { spatialCtxRef.current?.resume?.(); window.removeEventListener('pointerdown', resume); window.removeEventListener('keydown', resume); document.removeEventListener('visibilitychange', onVis); };
+      const onVis = () => { if (document.visibilityState === 'visible') spatialCtxRef.current?.resume?.(); };
+      window.addEventListener('pointerdown', resume, { once: true });
+      window.addEventListener('keydown', resume, { once: true });
+      document.addEventListener('visibilitychange', onVis);
+    }
+    const ctx = spatialCtxRef.current!;
+    if ((vid as any)._spatialized) {
+      if (screenPannerRef.current) {
+        screenPannerRef.current.positionX.value = 0;
+        screenPannerRef.current.positionY.value = 2.2;
+        screenPannerRef.current.positionZ.value = -4.05;
+      }
+      if (ctx.state === 'suspended') ctx.resume().catch(()=>{});
+      return;
+    }
+    try {
+      const source = ctx.createMediaElementSource(vid);
+      (vid as any)._spatialized = true;
+      const panner = ctx.createPanner();
+      panner.panningModel = 'HRTF';
+      panner.distanceModel = 'inverse';
+      panner.refDistance = 1.8;
+      panner.maxDistance = 80;
+      panner.rolloffFactor = 0.85;
+      panner.coneInnerAngle = 360; panner.coneOuterAngle = 0; panner.coneOuterGain = 0;
+      panner.positionX.value = 0; panner.positionY.value = 2.2; panner.positionZ.value = -4.05;
+      const gain = ctx.createGain();
+      gain.gain.value = 1; // ensure audible
+      source.connect(panner); panner.connect(gain); gain.connect(ctx.destination);
+      screenPannerRef.current = panner; screenGainRef.current = gain;
+      // Important: DO NOT also set volume=0, that can silence some browser pipelines.
+      // Keep element muted to avoid double (non‑spatial) playback; if still silent, comment next line.
+      vid.muted = true; // remove this line if silence persists.
+      if (ctx.state === 'suspended') ctx.resume().catch(()=>{});
+    } catch {
+      // Fallback: unmute direct element if spatial path fails
+      try { vid.muted = false; } catch {}
+    }
+  }, [primary]);
+  useEffect(() => () => { try { spatialCtxRef.current?.close(); } catch {}; spatialCtxRef.current=null; screenPannerRef.current=null; screenGainRef.current=null; }, []);
+
   return (
     <div className="absolute inset-0 pointer-events-auto select-none" style={{ zIndex: 5 }}>
       <Canvas shadows camera={{ position: [0, 1.8, 4.8], fov: 60 }}> {/* camera slightly higher */}
@@ -334,16 +403,16 @@ export function CinemaScene({ videoEl, enabled = true, mainVideoEl, localVideoEl
         {/* Emissive ceiling panel raised with ceiling */}
         <mesh position={[0,5.77,-1]} rotation={[Math.PI/2,0,0]}> <planeGeometry args={[14,14]} /> <meshBasicMaterial color={vivid.clone().multiplyScalar(0.4)} transparent opacity={0.33} /> </mesh>
         <MainScreen videoEl={primary} showPlayOverlay={showPlayOverlay} onPlayClick={onPlayClick} />
-        {/* Participant panels lifted proportionally */}
         <VideoPanel videoEl={localVideoEl || null} position={[-2.1, 4.3, -4]} rotation={[0, 0, 0]} label="Moi" />
         <VideoPanel videoEl={remoteVideoEl || null} position={[2.1, 4.3, -4]} rotation={[0, 0, 0]} label="Remote" />
         <Seats />
         <RoomDeco />
         <CameraRig />
         <CameraMover primaryVideo={primary} onPlayPauseHotkey={onPlayPauseHotkey} />
+        <SpatialAudioUpdater ctxRef={spatialCtxRef} />
       </Canvas>
       <div className="absolute top-2 left-1/2 -translate-x-1/2 text-[10px] text-neutral-300/90 bg-black/45 px-2 py-1 rounded pointer-events-none">
-        Clique pour FPV • WASD / Flèches • P: Play/Pause • C: Center • Esc: Quit • Ambilight {ambientEnabled? 'ON':'OFF'}
+        Clique pour FPV • WASD / Flèches • P: Play/Pause • C: Center • Esc: Quit • Ambilight {ambientEnabled? 'ON':'OFF'} • Spatial Audio (Screen)
       </div>
     </div>
   );
