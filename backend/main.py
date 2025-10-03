@@ -90,6 +90,7 @@ async def cinema_start(data: dict):
     vid = data.get("videoId")
     url = data.get("url")
     debug = bool(data.get("debug"))
+    force_copy = bool(data.get("copy"))  # option pour bypass transcodage vidéo
     if not vid and not url:
         raise HTTPException(400, "videoId ou url requis")
     target = url or f"https://www.youtube.com/watch?v={vid}"
@@ -108,44 +109,92 @@ async def cinema_start(data: dict):
     out_dir = ROOT / sid
     out_dir.mkdir(parents=True, exist_ok=True)
     playlist = out_dir / "index.m3u8"
+    err_log_path = out_dir / "ffmpeg.stderr.log"
+    err_file = open(err_log_path, "wb")
 
-    # Transcodage forcé unique (flux propre, démarrage t=0)
-    cmd = [
-        'ffmpeg','-nostdin','-hide_banner','-loglevel','error','-y','-i', direct_url,
-        '-analyzeduration','50M','-probesize','25M',
-        '-fflags','+genpts','-avoid_negative_ts','make_zero','-flush_packets','1',
-        '-vf','scale=-2:1080','-c:v','libx264','-preset','veryfast','-crf','22',
-        '-g','90','-keyint_min','90','-sc_threshold','0',
-        '-force_key_frames','expr:gte(t,n_forced*3)',
-        '-c:a','aac','-b:a','128k','-ac','2',
-        '-f','hls','-hls_time','3','-hls_list_size','0','-hls_flags','independent_segments',
-        '-hls_segment_filename', str(out_dir / 'seg_%05d.ts'), str(playlist)
+    # Construction commande ffmpeg
+    # Objectif: démarrer plus vite (supprime gros analyzeduration/probesize), robustesse réseau (reconnect), logs capturés.
+    base_input = [
+        'ffmpeg','-nostdin','-hide_banner','-y',
+        '-i', direct_url,
+        '-reconnect','1','-reconnect_streamed','1','-reconnect_delay_max','6',
+        '-fflags','+genpts','-avoid_negative_ts','make_zero','-flush_packets','1'
     ]
-    log.info("ffmpeg " + ' '.join(cmd[1:10]) + " ...")  # log partiel
+
+    if force_copy:
+        # Pas de ré-encodage vidéo; on copie (si codec compatible HLS). Audio converti AAC si nécessaire.
+        cmd = base_input + [
+            '-c:v','copy',
+            '-c:a','aac','-ac','2','-b:a','128k',
+            '-f','hls','-hls_time','3','-hls_list_size','0','-hls_flags','independent_segments',
+            '-hls_segment_filename', str(out_dir / 'seg_%05d.ts'), str(playlist)
+        ]
+    else:
+        cmd = base_input + [
+            '-vf','scale=-2:1080',
+            '-c:v','libx264','-preset','veryfast','-crf','22',
+            '-g','90','-keyint_min','90','-sc_threshold','0',
+            '-force_key_frames','expr:gte(t,n_forced*3)',
+            '-c:a','aac','-b:a','128k','-ac','2',
+            '-f','hls','-hls_time','3','-hls_list_size','0','-hls_flags','independent_segments',
+            '-hls_segment_filename', str(out_dir / 'seg_%05d.ts'), str(playlist)
+        ]
+
+    log.info("ffmpeg " + ' '.join(cmd[1:12]) + " ...")
     try:
-        proc = subprocess.Popen(cmd, stdout=None if debug else subprocess.DEVNULL, stderr=None if debug else subprocess.DEVNULL)
+        # Toujours capturer stderr dans fichier pour debug; si debug demander aussi niveau plus verbeux.
+        if debug:
+            # relance avec niveau warning pour plus de signal
+            if '-loglevel' not in cmd:
+                cmd.insert(2, 'error')  # placeholder si absent (rare)
+            # (on laisse -hide_banner)
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=err_file)
     except Exception as e:
+        err_file.close()
         raise HTTPException(500, f"ffmpeg start: {e}")
 
-    SESSIONS[sid] = {'path': str(out_dir), 'proc': proc, 'created_at': time.time(), 'source_url': target}
+    SESSIONS[sid] = {'path': str(out_dir), 'proc': proc, 'created_at': time.time(), 'source_url': target, 'stderr': str(err_log_path)}
 
-    # Attente playlist (apparait après 1er segment)
     import asyncio
-    for _ in range(120):  # ~12s
+    # Attente playlist prolongée (30s max)
+    for _ in range(300):  # 300 * 0.1s = 30s
         if playlist.exists():
             break
         if proc.poll() is not None:
+            # Process mort, lire logs
+            try:
+                err_file.flush()
+                err_file.close()
+                tail = b''
+                if err_log_path.exists():
+                    data = err_log_path.read_bytes()
+                    tail = data[-4000:]
+                log.error(f"ffmpeg ended early (rc={proc.returncode}) tail:\n{tail.decode(errors='ignore')}")
+            except: pass
             SESSIONS.pop(sid, None)
             try: shutil.rmtree(out_dir, ignore_errors=True)
             except: pass
             raise HTTPException(500, 'ffmpeg terminé prématurément')
         await asyncio.sleep(0.1)
     if not playlist.exists():
-        try: proc.terminate()
+        try:
+            proc.terminate()
+        except: pass
+        try:
+            err_file.flush(); err_file.close()
+            tail = b''
+            if err_log_path.exists():
+                data = err_log_path.read_bytes()
+                tail = data[-4000:]
+            log.error(f"Timeout playlist tail:\n{tail.decode(errors='ignore')}")
         except: pass
         SESSIONS.pop(sid, None)
         raise HTTPException(500, 'Timeout création playlist')
-    return { 'sessionId': sid, 'playlist': f"/cinema/{sid}/index.m3u8" }
+
+    # Fermer le handle local (process garde fd ouvert)
+    try: err_file.close()
+    except: pass
+    return { 'sessionId': sid, 'playlist': f"/cinema/{sid}/index.m3u8", 'copy': force_copy }
 
 # --- Service fichiers HLS ---
 @app.get('/cinema/{session_id}/{file_path:path}')
