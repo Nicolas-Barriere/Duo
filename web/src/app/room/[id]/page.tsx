@@ -14,7 +14,7 @@ type YTAction =
   | { action: "play" | "pause" | "seek"; time: number }
   | { action: "rate"; rate: number };
 
-type CinemaMsg = { action: 'play' | 'pause' | 'start' | 'stop'; t?: number; id?: string; playlist?: string; origin: string };
+type CinemaMsg = { action: 'play' | 'pause' | 'start' | 'stop'; t?: number; id?: string; playlist?: string; origin: string; seq?: number };
 
 type Msg =
   | { type: "system"; data: { event: "start_call" | "peer_left" } }
@@ -28,6 +28,21 @@ declare global { interface Window { YT: any; onYouTubeIframeAPIReady: () => void
 
 /* ============================ Utils ============================ */
 const fmtTime = (t: number) => !isFinite(t) ? "0:00" : `${Math.floor(t/60)}:${Math.floor(t%60).toString().padStart(2,'0')}`;
+// Helper to extract YouTube ID from full URL or raw id
+const parseYouTubeId = (raw: string): string | null => {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  // Direct 11-char id heuristic
+  if (/^[a-zA-Z0-9_-]{11}$/.test(trimmed)) return trimmed;
+  try {
+    const u = new URL(trimmed);
+    if (u.hostname.includes('youtu.be')) return u.pathname.slice(1).split('/')[0] || null;
+    if (u.searchParams.get('v')) return u.searchParams.get('v');
+    // /embed/ID
+    const m = u.pathname.match(/\/embed\/([a-zA-Z0-9_-]{11})/); if (m) return m[1];
+  } catch {}
+  return null;
+};
 
 /* ============================ Component ============================ */
 export default function Room() {
@@ -170,7 +185,7 @@ export default function Room() {
   };
 
   /* -------- Cinema / HLS -------- */
-  const [cinemaMode, setCinemaMode] = useState(false);
+  const [cinemaMode, setCinemaMode] = useState(false); // now only toggles 3D view (does NOT stop session)
   // removed ambientEnabled state (always on)
   // NEW: chat visibility + draggable position
   const [showChat, setShowChat] = useState(false);
@@ -202,6 +217,11 @@ export default function Room() {
   }, []);
 
   const [cinemaSession, setCinemaSession] = useState<{ id: string; playlist: string } | null>(null);
+  // New landing UI states
+  const [videoInput, setVideoInput] = useState("");
+  const [launching, setLaunching] = useState(false);
+  const [launchError, setLaunchError] = useState<string|null>(null);
+  const [recentVideos, setRecentVideos] = useState<string[]>([]);
   const [cinemaAudioOn, setCinemaAudioOn] = useState(false);
   const [micMutedDuringCinema, setMicMutedDuringCinema] = useState(false);
   const [cinemaPaused, setCinemaPaused] = useState(false);
@@ -209,28 +229,48 @@ export default function Room() {
   const cinemaUserStartedRef = useRef(false);
   const hlsRef = useRef<any>(null);
   const pendingCinemaCmdRef = useRef<{ action: 'play' | 'pause'; t: number } | null>(null);
+  // Sync helpers
+  const suppressBroadcastRef = useRef(false);
+  const lastBroadcastRef = useRef<{ action: 'play' | 'pause' | null; t: number; baseAt?: number }>({ action:null, t:0 });
+  const DRIFT_THRESHOLD = 0.6;
+  const cinemaSeqRef = useRef(0);
+  const lastRecvSeqRef = useRef(0);
+  const lastRemoteActionRef = useRef<{action:'play'|'pause'; at:number} | null>(null);
+  const attachInProgressRef = useRef(false);
+  const bootstrappedSessionRef = useRef<string | null>(null);
+
+  // Removed auto media event broadcast (was causing loops). We now only send play/pause via explicit user actions (buttons/click) not raw media events.
+  // Optional drift monitor (logs only)
+  useEffect(() => {
+    const id = setInterval(() => {
+      const el = videoProxyRef.current; if (!el || el.paused) return;
+      // Only log; actual correction happens when commands received.
+      if (lastBroadcastRef.current.action === 'play') {
+        const drift = Math.abs(el.currentTime - lastBroadcastRef.current.t);
+        if (drift > DRIFT_THRESHOLD + 0.3) console.debug('[cinema][drift-check] local drift vs last broadcast', drift.toFixed(2));
+      }
+    }, 5000);
+    return () => clearInterval(id);
+  }, [cinemaSession]);
 
   // Resizing effect (placed after cinemaMode declaration)
   useEffect(() => { const p = ytPlayerRef.current; if (!p) return; try { p.setSize((cinemaMode || showYTDebug) ? 320 : 1, (cinemaMode || showYTDebug) ? 270 : 1); } catch {}; }, [cinemaMode, showYTDebug]);
 
   const attachHLS = async (playlist: string, remote = false) => {
-    const el = videoProxyRef.current; if (!el) return;
+    if (attachInProgressRef.current) { return; }
+    attachInProgressRef.current = true;
+    const el = videoProxyRef.current; if (!el) { attachInProgressRef.current=false; return; }
     el.muted = true; el.volume = 1; setCinemaAudioOn(false); setMicMutedDuringCinema(false);
     const full = (process.env.NEXT_PUBLIC_BACKEND_HTTP || 'http://localhost:8001') + playlist;
     let firstManifest = true;
-    // Prime helper to ensure a first decoded frame for Three.js texture
     const prime = () => {
       let kicked = false;
-      const onPlaying = () => {
-        if (kicked) return; kicked = true;
-        // quick pause/play cycle to force frame flush
-        setTimeout(()=>{ try { el.pause(); el.play().catch(()=>{}); } catch {} }, 120);
-        el.removeEventListener('playing', onPlaying);
-      };
+      const onPlaying = () => { if (kicked) return; kicked = true; setTimeout(()=>{ try { el.pause(); el.play().catch(()=>{}); } catch {} }, 120); el.removeEventListener('playing', onPlaying); };
       el.addEventListener('playing', onPlaying);
     };
     prime();
     const setup = (H: any) => {
+      const done = () => { attachInProgressRef.current=false; };
       if (H && H.isSupported && H.isSupported()) {
         const hls = new H({ enableWorker: true, lowLatencyMode: false, liveSyncDurationCount: 3, maxBufferLength: 60, maxBufferSize: 120*1e6 });
         hlsRef.current = hls; hls.loadSource(full); hls.attachMedia(el);
@@ -242,6 +282,7 @@ export default function Room() {
             if (c.action==='play') { el.play().catch(()=>{}); setCinemaPaused(false);} else { el.pause(); setCinemaPaused(true); }
           }
           if (cinemaUserStartedRef.current && !cinemaPaused) el.play().catch(()=>{});
+          done();
         });
         hls.on(H.Events.ERROR, (_e: any, data: any) => {
           if (data?.fatal) {
@@ -249,8 +290,8 @@ export default function Room() {
             else if (data.type==='networkError') { try { hls.stopLoad(); hls.startLoad(el.currentTime); } catch {} }
           }
         });
-      } else if (el.canPlayType('application/vnd.apple.mpegurl')) { el.src = full; }
-      else { el.src = full; }
+      } else if (el.canPlayType('application/vnd.apple.mpegurl')) { el.src = full; attachInProgressRef.current=false; }
+      else { el.src = full; attachInProgressRef.current=false; }
     };
     try { const mod = await import('hls.js'); setup(mod.default || mod); } catch { setup(Hls); }
   };
@@ -268,20 +309,29 @@ export default function Room() {
     tryPrime();
   }, [cinemaMode, cinemaSession]);
 
-  const startCinemaStream = async () => {
-    if (cinemaSession) await stopCinemaStream();
-    const vid = prompt('ID YouTube à projeter'); if (!vid) return;
+  const startCinemaFor = async (videoId: string) => {
+    if (!videoId || launching) return;
+    setLaunchError(null); setLaunching(true);
     try {
-      const r = await fetch((process.env.NEXT_PUBLIC_BACKEND_HTTP || 'http://localhost:8001') + '/cinema/start', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ videoId: vid }) });
-      if (!r.ok) return alert('Erreur');
+      const r = await fetch((process.env.NEXT_PUBLIC_BACKEND_HTTP || 'http://localhost:8001') + '/cinema/start', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ videoId }) });
+      if (r.status === 403) { setLaunchError('Vidéo nécessite authentification (cookies).'); setLaunching(false); return; }
+      if (!r.ok) { setLaunchError('Erreur démarrage'); setLaunching(false); return; }
       const j = await r.json();
-      setCinemaSession({ id: j.sessionId, playlist: j.playlist });
+      setCinemaSession({ id:j.sessionId, playlist:j.playlist });
       safeSend({ type:'cinema', data:{ action:'start', id:j.sessionId, playlist:j.playlist, origin:selfIdRef.current } });
-      setCinemaUserStarted(false); cinemaUserStartedRef.current = false; setCinemaPaused(false);
-      setTimeout(()=>attachHLS(j.playlist), 500);
-    } catch {}
+      setCinemaUserStarted(false); cinemaUserStartedRef.current=false; setCinemaPaused(false);
+      setTimeout(()=>attachHLS(j.playlist), 300);
+      setLaunching(false);
+      setRecentVideos(v => [videoId, ...v.filter(x => x!==videoId)].slice(0,6));
+    } catch { setLaunchError('Exception'); setLaunching(false); }
   };
-  const stopCinemaStream = async () => {
+  // Legacy prompt function removal (keep name compatibility)
+  const startCinemaStream = async () => {
+    const vid = parseYouTubeId(videoInput);
+    if (!vid) { setLaunchError('ID/URL invalide'); return; }
+    await startCinemaFor(vid);
+  };
+  const stopCinemaStream = async () => { /* modified: does not alter cinemaMode */
     if (!cinemaSession) return; const old = cinemaSession;
     try { await fetch((process.env.NEXT_PUBLIC_BACKEND_HTTP || 'http://localhost:8001') + '/cinema/stop/' + old.id, { method:'POST' }); } catch {}
     safeSend({ type:'cinema', data:{ action:'stop', id: old.id, origin:selfIdRef.current } });
@@ -289,20 +339,75 @@ export default function Room() {
     if (micMutedDuringCinema) localStreamRef.current?.getAudioTracks().forEach(t => t.enabled = true);
     setCinemaAudioOn(false); setMicMutedDuringCinema(false); setCinemaPaused(false); setCinemaUserStarted(false); cinemaUserStartedRef.current=false; hlsRef.current=null; setCinemaSession(null);
   };
-  const playCinema = () => { const el = videoProxyRef.current; if (!el) return; hlsRef.current?.startLoad?.(); el.play().catch(()=>{}); if (!cinemaUserStartedRef.current){ cinemaUserStartedRef.current=true; setCinemaUserStarted(true);} setCinemaPaused(false); safeSend({ type:'cinema', data:{ action:'play', t: el.currentTime, origin:selfIdRef.current } }); };
-  const pauseCinema = () => { const el = videoProxyRef.current; if (!el) return; el.pause(); hlsRef.current?.stopLoad?.(); setCinemaPaused(true); safeSend({ type:'cinema', data:{ action:'pause', t: el.currentTime, origin:selfIdRef.current } }); };
+  const playCinema = () => { const el = videoProxyRef.current; if (!el) return; console.debug('[cinema][local] playCinema()'); hlsRef.current?.startLoad?.(); suppressBroadcastRef.current = true; el.play().catch(()=>{}).finally(()=>{ setTimeout(()=>{ suppressBroadcastRef.current=false; },180); }); if (!cinemaUserStartedRef.current){ cinemaUserStartedRef.current=true; setCinemaUserStarted(true);} setCinemaPaused(false); const t = el.currentTime; lastBroadcastRef.current={action:'play', t, baseAt: performance.now()}; const seq=++cinemaSeqRef.current; console.debug('[cinema][broadcast] play (button)', t, 'seq', seq); safeSend({ type:'cinema', data:{ action:'play', t, origin:selfIdRef.current, id:cinemaSession?.id, playlist:cinemaSession?.playlist, seq } }); };
+  const pauseCinema = () => { const el = videoProxyRef.current; if (!el) return; console.debug('[cinema][local] pauseCinema()'); suppressBroadcastRef.current = true; el.pause(); setTimeout(()=>{ suppressBroadcastRef.current=false; },180); setCinemaPaused(true); const t = el.currentTime; lastBroadcastRef.current={action:'pause', t}; const seq=++cinemaSeqRef.current; console.debug('[cinema][broadcast] pause (button)', t, 'seq', seq); safeSend({ type:'cinema', data:{ action:'pause', t, origin:selfIdRef.current, id:cinemaSession?.id, playlist:cinemaSession?.playlist, seq } }); };
   const enableCinemaAudio = () => { const el = videoProxyRef.current; if (!el) return; el.muted=false; el.play().catch(()=>{}); setCinemaAudioOn(true); };
 
   const handleCinemaMessage = async (data: CinemaMsg) => {
-    if (data.origin === selfIdRef.current) return; const el = videoProxyRef.current;
+    if (data.origin === selfIdRef.current) return; let el = videoProxyRef.current;
+    if (data.seq && data.seq <= lastRecvSeqRef.current) { console.debug('[cinema][recv][stale]', data.seq, '<=', lastRecvSeqRef.current); return; }
+    if (data.seq) lastRecvSeqRef.current = data.seq;
+    const now = performance.now();
+    if (lastRemoteActionRef.current && lastRemoteActionRef.current.action === data.action && (now - lastRemoteActionRef.current.at) < 180) {
+      return; // tighter debounce
+    }
+    lastRemoteActionRef.current = { action: data.action as 'play'|'pause', at: now };
+    console.debug('[cinema][recv]', data);
     if (data.action === 'start') {
       if (cinemaSession && cinemaSession.id === data.id) return; if (cinemaSession && cinemaSession.id !== data.id) await stopCinemaStream();
-      if (!data.id || !data.playlist) return; setCinemaSession({ id:data.id, playlist:data.playlist }); setCinemaUserStarted(false); cinemaUserStartedRef.current=false; setTimeout(()=>attachHLS(data.playlist!, true), 300); return;
+      if (!data.id || !data.playlist) return; setCinemaSession({ id:data.id, playlist:data.playlist }); bootstrappedSessionRef.current=data.id; setCinemaUserStarted(false); cinemaUserStartedRef.current=false; setTimeout(()=>attachHLS(data.playlist!, true), 300); return;
     }
     if (data.action === 'stop') { if (cinemaSession && cinemaSession.id === data.id) await stopCinemaStream(); return; }
-    if (!el || !cinemaSession) { if ((data.action==='play'||data.action==='pause') && typeof data.t==='number') pendingCinemaCmdRef.current = { action:data.action, t:data.t }; return; }
-    if (data.action==='play' && typeof data.t==='number') { try { el.currentTime = data.t; } catch {}; if (!cinemaUserStartedRef.current){ cinemaUserStartedRef.current=true; setCinemaUserStarted(true);} el.play().catch(()=>{}); setCinemaPaused(false); }
-    else if (data.action==='pause' && typeof data.t==='number') { try { el.currentTime = data.t; } catch {}; el.pause(); setCinemaPaused(true); }
+
+    // Bootstrap session if absent
+    if (!cinemaSession && data.id && data.playlist) {
+      if (bootstrappedSessionRef.current === data.id) {
+        // already queued a bootstrap; skip duplicate
+      } else {
+        console.debug('[cinema][bootstrap from play/pause]');
+        bootstrappedSessionRef.current = data.id;
+        setCinemaSession({ id: data.id, playlist: data.playlist });
+        setTimeout(()=>attachHLS(data.playlist!, true), 200);
+      }
+    }
+
+    if (!el) {
+      const v = document.createElement('video'); v.playsInline=true; v.muted=true; v.style.display='none'; document.body.appendChild(v); videoProxyRef.current=v; el=v;
+      if ((cinemaSession || data.playlist) && !hlsRef.current && (data.playlist || cinemaSession?.playlist)) attachHLS(data.playlist || cinemaSession!.playlist, true);
+    }
+
+    if (!cinemaSession && !(data.id && data.playlist)) {
+      if ((data.action==='play'||data.action==='pause') && typeof data.t==='number') pendingCinemaCmdRef.current={ action:data.action, t:data.t };
+      return;
+    }
+
+    if (el && el.readyState < 1 && !hlsRef.current && (cinemaSession?.playlist || data.playlist)) attachHLS(data.playlist || cinemaSession!.playlist, true);
+
+    if (el.readyState < 1) {
+      if ((data.action==='play'||data.action==='pause') && typeof data.t==='number') pendingCinemaCmdRef.current={ action:data.action, t:data.t };
+      return;
+    }
+
+    // Drift logic: only correct on play if >1.2s, on pause if >0.8s
+    if (typeof data.t === 'number') {
+      const cur = el.currentTime;
+      const drift = cur - data.t;
+      const limit = data.action==='play' ? 1.2 : 0.8;
+      if (Math.abs(drift) > limit) { try { el.currentTime = data.action==='pause'? data.t : (data.t + 0.06); } catch {} }
+    }
+
+    suppressBroadcastRef.current = true;
+    if (!cinemaUserStartedRef.current) { cinemaUserStartedRef.current=true; setCinemaUserStarted(true); }
+    if (data.action==='play') {
+      if (!el.paused) { /* already playing */ }
+      else { el.play().catch(()=>{}); }
+      setCinemaPaused(false);
+    } else if (data.action==='pause') {
+      if (el.paused) { /* already paused */ }
+      else { el.pause(); }
+      setCinemaPaused(true);
+    }
+    setTimeout(()=>{ suppressBroadcastRef.current=false; }, 140);
   };
 
   /* -------- Draggable / Resizable local+remote videos -------- */
@@ -348,13 +453,14 @@ export default function Room() {
   /* ============================ Render ============================ */
   return (
     <main className="w-full h-screen overflow-hidden relative select-none">
-      {cinemaMode && (
+      {/* 3D immersive view */}
+      {cinemaMode && cinemaSession && (
         <div className="absolute inset-0 z-0 bg-black">
           <CinemaScene
-            mainVideoEl={cinemaSession ? videoProxyRef.current : remoteVideoRef.current}
+            mainVideoEl={videoProxyRef.current || remoteVideoRef.current}
             localVideoEl={localVideoRef.current}
             remoteVideoEl={remoteVideoRef.current}
-            videoEl={cinemaSession ? videoProxyRef.current : remoteVideoRef.current}
+            videoEl={videoProxyRef.current || remoteVideoRef.current}
             enabled
             ambientEnabled={true}
             showPlayOverlay={!!cinemaSession && !cinemaUserStarted}
@@ -363,9 +469,55 @@ export default function Room() {
           />
         </div>
       )}
-
-      <div className="absolute top-2 left-2 text-xs text-neutral-400 font-mono pointer-events-none z-30">Salle {roomId} | {status}</div>
-
+      {/* 2D video surface (when session active and not in 3D) */}
+      {cinemaSession && !cinemaMode && (
+        <div className="absolute inset-0 flex items-center justify-center px-6 pt-20 pb-28 pointer-events-none">
+          <div className="relative w-full max-w-4xl aspect-video rounded-2xl overflow-hidden bg-black border border-neutral-800 shadow-lg pointer-events-auto">
+            <video ref={videoProxyRef} playsInline onClick={()=>{ const v=videoProxyRef.current; if(!v) return; v.paused? playCinema(): pauseCinema(); }} className="w-full h-full object-cover" muted={!cinemaAudioOn} />
+            {!cinemaUserStarted && (
+              <button
+                onClick={()=>{ const el=videoProxyRef.current; if(!el) return; cinemaUserStartedRef.current=true; setCinemaUserStarted(true); el.muted=true; suppressBroadcastRef.current=true; el.play().then(()=>{ setCinemaPaused(false); const t=el.currentTime; lastBroadcastRef.current={action:'play', t}; suppressBroadcastRef.current=false; const seq=++cinemaSeqRef.current; safeSend({ type:'cinema', data:{ action:'play', t, origin:selfIdRef.current, id:cinemaSession?.id, playlist:cinemaSession?.playlist, seq } }); }).catch(()=>{ suppressBroadcastRef.current=false; }); }}
+                className="absolute inset-0 flex items-center justify-center bg-black/55 backdrop-blur-sm text-white text-sm font-medium"
+              >Démarrer (lecture muette synchronisée)</button>
+            )}
+            {cinemaUserStarted && cinemaPaused && (
+              <button onClick={()=>playCinema()} className="absolute inset-0 flex items-center justify-center bg-black/40 text-white text-sm font-medium">Lecture</button>
+            )}
+            {/* Hint to enable audio */}
+            {cinemaUserStarted && !cinemaAudioOn && !cinemaPaused && (
+              <div className="absolute bottom-2 right-2 px-2 py-1 rounded-md bg-neutral-900/70 text-[11px] text-neutral-300">Activer audio via 🔊</div>
+            )}
+          </div>
+        </div>
+      )}
+      {/* Landing input card (no active session) */}
+      {!cinemaSession && (
+        <div className="absolute inset-0 flex items-center justify-center px-6 pt-24 pb-32">
+          <div className="w-full max-w-md rounded-2xl border border-neutral-800 bg-neutral-950/70 backdrop-blur-xl p-6 flex flex-col gap-4 shadow-[0_0_0_1px_rgba(255,255,255,0.05),0_30px_80px_-30px_rgba(0,0,0,0.6)]">
+            <div>
+              <h2 className="text-sm font-semibold tracking-wide text-neutral-200">Projeter une vidéo</h2>
+              <p className="text-xs text-neutral-500 mt-1 leading-relaxed">Collez un lien YouTube ou un ID. La vidéo sera prête, puis vous pourrez basculer entre vue 2D et cinéma 3D.</p>
+            </div>
+            <form onSubmit={e=>{ e.preventDefault(); const vid=parseYouTubeId(videoInput); if(!vid){ setLaunchError('ID/URL invalide'); return;} startCinemaFor(vid); }} className="flex gap-2 items-center">
+              <input value={videoInput} onChange={e=>{ setVideoInput(e.target.value); setLaunchError(null); }} placeholder="Lien ou ID YouTube" className="flex-1 h-10 rounded-lg px-3 bg-neutral-900/70 border border-neutral-700 focus:border-neutral-500 outline-none text-sm text-neutral-200 placeholder-neutral-500" />
+              <button type="submit" disabled={launching} className="h-10 px-4 rounded-lg bg-white text-neutral-900 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed hover:bg-neutral-200 transition">{launching? '...' : 'Lancer'}</button>
+            </form>
+            {launchError && <div className="text-xs text-red-400 font-medium">{launchError}</div>}
+            {recentVideos.length>0 && (
+              <div className="flex flex-wrap gap-2 mt-1">
+                {recentVideos.map(v => <button key={v} onClick={()=>startCinemaFor(v)} className="px-2.5 py-1.5 text-[11px] rounded-md bg-neutral-800/70 hover:bg-neutral-700 text-neutral-300 font-mono tracking-wide">{v}</button>)}
+              </div>
+            )}
+            <div className="pt-1 border-t border-neutral-800 flex items-center justify-between text-[10px] text-neutral-500">
+              <span>Salle {roomId}</span>
+              <span>{status}</span>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Status small badge (keep) */}
+      <div className="absolute top-2 left-2 text-[11px] text-neutral-400 font-mono pointer-events-none z-30">Salle {roomId} | {status}</div>
+      {/* Local/remote draggable composite stays above landing & 2D surfaces (hidden in 3D) */}
       <div
         onPointerDown={startDrag}
         style={{ transform:`translate(${box.x}px, ${box.y}px)`, width:box.w, height:box.h }}
@@ -382,48 +534,19 @@ export default function Room() {
       {/* Control Panel - minimal vercel-like */}
       <div className="pointer-events-none absolute inset-x-0 bottom-4 flex justify-center z-50">
         <div className="pointer-events-auto flex items-center gap-3 rounded-full px-4 py-2 bg-neutral-950/70 backdrop-blur supports-[backdrop-filter]:bg-neutral-950/55 border border-neutral-800 shadow-[0_0_0_1px_rgba(255,255,255,0.04),0_8px_24px_-6px_rgba(0,0,0,0.6)]">
-          <button
-            title={cinemaMode? 'Retour 2D (stop)': 'Mode cinéma'}
-            onClick={() => {
-              if (cinemaMode) {
-                if (cinemaSession) stopCinemaStream();
-                setCinemaMode(false);
-              } else {
-                setCinemaMode(true);
-              }
-            }}
-            className="h-8 w-8 rounded-full flex items-center justify-center text-neutral-300 hover:text-white hover:bg-neutral-800/70 active:bg-neutral-700 transition"
-          >
-            {cinemaMode ? '🗗' : '🎬'}
-          </button>
-          {/* Removed ambient toggle (always on) */}
+          {cinemaSession && (
+            <button title={cinemaMode? 'Vue 2D' : 'Vue 3D'} onClick={()=> setCinemaMode(m=>!m)} className="h-8 w-8 rounded-full flex items-center justify-center text-neutral-300 hover:text-white hover:bg-neutral-800/70 active:bg-neutral-700 transition">{cinemaMode? '🗗':'🎬'}</button>
+          )}
           {!cinemaSession && (
-            <button title="Projeter une vidéo" onClick={startCinemaStream} className="h-8 px-3 rounded-full text-[12px] font-medium bg-neutral-100 text-neutral-900 hover:bg-white active:bg-neutral-200 transition">Projeter</button>
+            <button disabled className="h-8 w-8 rounded-full flex items-center justify-center text-neutral-600 border border-neutral-800">🎬</button>
           )}
           {cinemaSession && (
             <>
-              {/* Removed stop button (exit via retour 2D) */}
               {cinemaUserStarted && !cinemaPaused && <button title="Pause" onClick={pauseCinema} className="h-8 w-8 rounded-full flex items-center justify-center text-neutral-300 hover:text-white hover:bg-neutral-800/60 active:bg-neutral-700 transition">❚❚</button>}
               {cinemaUserStarted && cinemaPaused && <button title="Lecture" onClick={playCinema} className="h-8 w-8 rounded-full flex items-center justify-center text-neutral-300 hover:text-white hover:bg-neutral-800/60 active:bg-neutral-700 transition">▶</button>}
-              {!cinemaAudioOn && <button title="Activer audio" onClick={enableCinemaAudio} className="h-8 w-8 rounded-full flex items-center justify-center text-neutral-300 hover:text-white hover:bg-neutral-800/60 active:bg-neutral-700 transition">🔊</button>}
+              {!cinemaAudioOn && cinemaUserStarted && <button title="Activer audio" onClick={enableCinemaAudio} className="h-8 w-8 rounded-full flex items-center justify-center text-neutral-300 hover:text-white hover:bg-neutral-800/60 active:bg-neutral-700 transition">🔊</button>}
+              <button title="Arrêter" onClick={stopCinemaStream} className="h-8 w-8 rounded-full flex items-center justify-center text-neutral-400 hover:text-white hover:bg-neutral-800/60 active:bg-neutral-700 transition">✕</button>
             </>
-          )}
-          <div className="w-px h-6 bg-neutral-800" />
-          {/* Removed YouTube play/pause button */}
-          <div className="flex items-center gap-2 w-[480px] max-w-[60vw]">
-            <input
-              ref={progressRef}
-              type="range" min={0} max={1000} defaultValue={0}
-              className="flex-1 accent-neutral-300 h-2 rounded-full"
-              onChange={e => { const p = ytPlayerRef.current; if (!p) return; const d = p.getDuration?.() || ytState.duration || 0; if (!d) return; const ratio=parseFloat(e.target.value)/1000; const nt=d*ratio; if(!isFinite(nt)) return; p.seekTo(nt,true); safeSend({ type:'yt', data:{ action:'seek', time:nt, origin:selfIdRef.current } }); }}
-            />
-            <span className="text-[11px] font-mono text-neutral-500 tabular-nums">{fmtTime(ytState.current)}</span>
-          </div>
-          {cinemaSession && cinemaAudioOn && (
-            <div className="flex items-center gap-1 pl-1">
-              <span className="text-[10px] text-neutral-500">Vol</span>
-              <input type="range" min={0} max={1} step={0.01} defaultValue={1} className="w-24 accent-neutral-300 h-2" onChange={e => { if (videoProxyRef.current) videoProxyRef.current.volume = parseFloat(e.target.value); if (videoProxyRef.current && (videoProxyRef.current as any)._spatialGain) { (videoProxyRef.current as any)._spatialGain.gain.value = parseFloat(e.target.value); } }} />
-            </div>
           )}
           <div className="w-px h-6 bg-neutral-800" />
           <button title={showChat? 'Masquer chat':'Afficher chat'} onClick={() => setShowChat(c=>!c)} className={`h-8 w-8 rounded-full flex items-center justify-center transition ${showChat? 'text-neutral-300 bg-neutral-800/60 hover:bg-neutral-700 active:bg-neutral-600':'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/50'}`}>💬</button>
@@ -483,9 +606,6 @@ export default function Room() {
           </form>
         </div>
       )}
-
-      <video ref={videoProxyRef} playsInline className="hidden" />
-      <div ref={youtubeContainerRef} className={(cinemaMode || showYTDebug) ? "absolute bottom-24 right-4 w-80 h-48 bg-black/80 border border-purple-500 rounded overflow-hidden z-50" : "w-0 h-0 overflow-hidden"} />
     </main>
   );
 }
