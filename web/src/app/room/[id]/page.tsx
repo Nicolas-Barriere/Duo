@@ -89,7 +89,7 @@ export default function Room() {
     pcRef.current = pc;
     if (!remoteStreamRef.current) remoteStreamRef.current = new MediaStream();
     if (remoteVideoRef.current) remoteVideoRef.current.srcObject = remoteStreamRef.current;
-    ["video", "audio"].forEach(k => { try { pc.addTransceiver(k as any, { direction: "sendrecv" }); } catch {} });
+    (["video", "audio"] as Array<"video"|"audio">).forEach(k => { try { pc.addTransceiver(k, { direction: "sendrecv" }); } catch {} });
     if (localStreamRef.current) localStreamRef.current.getTracks().forEach(t => { try { pc.addTrack(t, localStreamRef.current!); } catch {} });
     pc.ontrack = ev => {
       const track = ev.track;
@@ -160,8 +160,8 @@ export default function Room() {
   const primeFrameRef = useRef(false);
   const progressRef = useRef<HTMLInputElement | null>(null);
   const [ytState, setYtState] = useState({ current: 0, duration: 0, playing: false, rate: 1 });
-  const [currentVideoId, setCurrentVideoId] = useState<string | null>(null);
-  const [showYTDebug, setShowYTDebug] = useState(false);
+  const [currentVideoId, setCurrentVideoId] = useState<string | null>(null); // retained for future, underscore setter not needed since used in ytLoad
+  const [showYTDebug, _setShowYTDebug] = useState(false);
 
   const initYT = () => {
     if (ytPlayerRef.current || !youtubeContainerRef.current || !window.YT?.Player) return;
@@ -177,7 +177,7 @@ export default function Room() {
             if (progressRef.current && !progressRef.current.matches(':active')) progressRef.current.value = d ? String((c/d)*1000) : '0';
           }, 500);
         },
-        onStateChange: (e: any) => {
+        onStateChange: (e: { data: number }) => {
           const state = e.data; const p = ytPlayerRef.current; if (!p) return;
             if (primeFrameRef.current) { if ([window.YT.PlayerState.PAUSED, window.YT.PlayerState.PLAYING, window.YT.PlayerState.CUED].includes(state)) primeFrameRef.current = false; return; }
             if (state === window.YT.PlayerState.BUFFERING) return;
@@ -192,17 +192,15 @@ export default function Room() {
   useEffect(() => { if (window.YT?.Player) initYT(); else { const s = document.createElement('script'); s.src = 'https://www.youtube.com/iframe_api'; s.async = true; document.body.appendChild(s); window.onYouTubeIframeAPIReady = initYT; } }, []);
   // (Resizing effect moved below after cinemaMode declaration to avoid TDZ)
 
-  const ytSeek = (delta: number) => { const p = ytPlayerRef.current; if (!p) return; const nt = Math.max(0, p.getCurrentTime()+delta); p.seekTo(nt, true); safeSend({ type:'yt', data:{ action:'seek', time: nt, origin:selfIdRef.current } }); };
-  const ytSetRate = (rate: number) => { const p = ytPlayerRef.current; if (!p) return; p.setPlaybackRate(rate); setYtState(s => ({ ...s, rate })); safeSend({ type:'yt', data:{ action:'rate', rate, origin:selfIdRef.current } }); };
-  const ytLoad = (videoId: string) => { const p = ytPlayerRef.current; if (!p || !videoId) return; setCurrentVideoId(videoId); lastSentRef.current = {}; p.loadVideoById(videoId,0); primeFrameRef.current = true; setTimeout(()=>{ try { p.playVideo(); setTimeout(()=>{ p.pauseVideo(); p.seekTo(0,true); const d=p.getDuration?.()||0; setYtState(s=>({...s,current:0,duration:d,playing:false})); progressRef.current && (progressRef.current.value='0'); },350);} catch {} },60); safeSend({ type:'yt', data:{ action:'load', videoId, origin:selfIdRef.current } }); };
-  const ytTogglePlay = () => { const p = ytPlayerRef.current; if (!p) return; ytState.playing ? p.pauseVideo() : p.playVideo(); };
+  const ytLoad = (videoId: string) => {
+    const p = ytPlayerRef.current; if (!p || !videoId) return; setCurrentVideoId(videoId); lastSentRef.current = {}; p.loadVideoById(videoId,0); primeFrameRef.current = true; setTimeout(()=>{ try { p.playVideo(); setTimeout(()=>{ p.pauseVideo(); p.seekTo(0,true); const d=p.getDuration?.()||0; setYtState(s=>({...s,current:0,duration:d,playing:false})); if (progressRef.current) { progressRef.current.value='0'; } },350);} catch {} },60); safeSend({ type:'yt', data:{ action:'load', videoId, origin:selfIdRef.current } }); };
   const handleYTMessage = (data: (YTAction & { origin: string })) => {
     if (data.origin === selfIdRef.current) return; const p = ytPlayerRef.current; if (!p) return;
     if (data.action === 'play') { p.seekTo(data.time, true); p.playVideo(); }
     else if (data.action === 'pause') { p.seekTo(data.time, true); p.pauseVideo(); }
     else if (data.action === 'seek') { p.seekTo(data.time, true); }
     else if (data.action === 'rate') { p.setPlaybackRate(data.rate); }
-    else if (data.action === 'load') { setCurrentVideoId(data.videoId); p.loadVideoById(data.videoId,0); primeFrameRef.current = true; setTimeout(()=>{ try { p.playVideo(); setTimeout(()=>{ p.pauseVideo(); p.seekTo(0,true); const d=p.getDuration?.()||0; setYtState(s=>({...s,current:0,duration:d,playing:false})); progressRef.current && (progressRef.current.value='0'); },350);} catch {} },50); lastSentRef.current = {}; }
+    else if (data.action === 'load') { setCurrentVideoId(data.videoId); p.loadVideoById(data.videoId,0); primeFrameRef.current = true; setTimeout(()=>{ try { p.playVideo(); setTimeout(()=>{ p.pauseVideo(); p.seekTo(0,true); const d=p.getDuration?.()||0; setYtState(s=>({...s,current:0,duration:d,playing:false})); if (progressRef.current) { progressRef.current.value='0'; } },350);} catch {} },50); lastSentRef.current = {}; }
   };
 
   /* -------- Cinema / HLS -------- */
@@ -277,7 +275,7 @@ export default function Room() {
   // Resizing effect (placed after cinemaMode declaration)
   useEffect(() => { const p = ytPlayerRef.current; if (!p) return; try { p.setSize((cinemaMode || showYTDebug) ? 320 : 1, (cinemaMode || showYTDebug) ? 270 : 1); } catch {}; }, [cinemaMode, showYTDebug]);
 
-  const attachHLS = async (playlist: string, remote = false) => {
+  const attachHLS = async (playlist: string, _remote = false) => {
     if (attachInProgressRef.current) { return; }
     attachInProgressRef.current = true;
     const el = videoProxyRef.current; if (!el) { attachInProgressRef.current=false; return; }
@@ -286,35 +284,39 @@ export default function Room() {
     let firstManifest = true;
     const prime = () => {
       let kicked = false;
-      const onPlaying = () => { if (kicked) return; kicked = true; setTimeout(()=>{ try { el.pause(); el.play().catch(()=>{}); } catch {} }, 120); el.removeEventListener('playing', onPlaying); };
+      const onPlaying = () => { if (kicked) return; kicked = true; setTimeout(()=>{ try { el.pause(); void el.play().catch(()=>{}); } catch {} }, 120); el.removeEventListener('playing', onPlaying); };
       el.addEventListener('playing', onPlaying);
     };
     prime();
-    const setup = (H: any) => {
+    type HlsCtor = typeof Hls;
+    const setup = (H: HlsCtor) => {
       const done = () => { attachInProgressRef.current=false; };
-      if (H && H.isSupported && H.isSupported()) {
-        const hls = new H({ enableWorker: true, lowLatencyMode: false, liveSyncDurationCount: 3, maxBufferLength: 60, maxBufferSize: 120*1e6 });
-        hlsRef.current = hls; hls.loadSource(full); hls.attachMedia(el);
-        hls.on(H.Events.MANIFEST_PARSED, () => {
-          if (firstManifest) { try { el.currentTime = 0; } catch {}; firstManifest=false; }
-          if (pendingCinemaCmdRef.current) {
-            const c = pendingCinemaCmdRef.current; pendingCinemaCmdRef.current=null;
-            try { el.currentTime = c.t; } catch {};
-            if (c.action==='play') { el.play().catch(()=>{}); setCinemaPaused(false);} else { el.pause(); setCinemaPaused(true); }
-          }
-          if (cinemaUserStartedRef.current && !cinemaPaused) el.play().catch(()=>{});
-          done();
-        });
-        hls.on(H.Events.ERROR, (_e: any, data: any) => {
-          if (data?.fatal) {
-            if (data.type==='mediaError') { try { hls.recoverMediaError(); } catch {} }
-            else if (data.type==='networkError') { try { hls.stopLoad(); hls.startLoad(el.currentTime); } catch {} }
-          }
-        });
-      } else if (el.canPlayType('application/vnd.apple.mpegurl')) { el.src = full; attachInProgressRef.current=false; }
-      else { el.src = full; attachInProgressRef.current=false; }
+      try {
+        if (H.isSupported()) {
+          const hls = new H({ enableWorker: true, lowLatencyMode: false, liveSyncDurationCount: 3, maxBufferLength: 60, maxBufferSize: 120*1e6 });
+          hlsRef.current = hls; hls.loadSource(full); hls.attachMedia(el);
+          const Events = (H as unknown as typeof Hls).Events; // capture events enum
+          hls.on(Events.MANIFEST_PARSED, () => {
+            if (firstManifest) { try { el.currentTime = 0; } catch {}; firstManifest=false; }
+            if (pendingCinemaCmdRef.current) {
+              const c = pendingCinemaCmdRef.current; pendingCinemaCmdRef.current=null;
+              try { el.currentTime = c.t; } catch {};
+              if (c.action==='play') { void el.play().catch(()=>{}); setCinemaPaused(false);} else { el.pause(); setCinemaPaused(true); }
+            }
+            if (cinemaUserStartedRef.current && !cinemaPaused) void el.play().catch(()=>{});
+            done();
+          });
+          hls.on(Events.ERROR, (_event, data) => {
+            if ((data as any)?.fatal) {
+              if ((data as any).type==='mediaError') { try { hls.recoverMediaError(); } catch {} }
+              else if ((data as any).type==='networkError') { try { hls.stopLoad(); hls.startLoad(el.currentTime); } catch {} }
+            }
+          });
+        } else if (el.canPlayType('application/vnd.apple.mpegurl')) { el.src = full; attachInProgressRef.current=false; }
+        else { el.src = full; attachInProgressRef.current=false; }
+      } catch { attachInProgressRef.current=false; }
     };
-    try { const mod = await import('hls.js'); setup(mod.default || mod); } catch { setup(Hls); }
+    try { const mod = await import('hls.js'); const Loaded = (mod as { default: HlsCtor }).default || (mod as unknown as HlsCtor); setup(Loaded); } catch { setup(Hls); }
   };
 
   // Prime remote video for 3D scene texture (ensures at least one frame decoded)

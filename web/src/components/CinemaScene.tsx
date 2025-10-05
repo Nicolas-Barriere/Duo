@@ -2,7 +2,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
-import { Environment, Html } from '@react-three/drei';
+import { Html } from '@react-three/drei';
 
 interface CinemaProps {
   videoEl: HTMLVideoElement | null; // backward compat (main video)
@@ -66,7 +66,7 @@ function MainScreen({ videoEl, showPlayOverlay, onPlayClick }: { videoEl: HTMLVi
   );
 }
 
-function VideoPanel({ videoEl, position, rotation, label }: { videoEl: HTMLVideoElement | null; position: [number, number, number]; rotation: [number, number, number]; label: string }) {
+function VideoPanel({ videoEl, position, rotation }: { videoEl: HTMLVideoElement | null; position: [number, number, number]; rotation: [number, number, number]; /* label removed */ }) {
   const texture = useVideoTexture(videoEl);
   return (
     <group position={position} rotation={rotation}>
@@ -82,7 +82,6 @@ function VideoPanel({ videoEl, position, rotation, label }: { videoEl: HTMLVideo
         <planeGeometry args={[1.3, 0.18]} />
         <meshBasicMaterial color="#000" />
       </mesh>
-      {/* Simple text sprite replacement */}
     </group>
   );
 }
@@ -301,7 +300,11 @@ function SpatialAudioUpdater({ ctxRef }: { ctxRef: React.MutableRefObject<AudioC
       listener.forwardX.value = fwd.x; listener.forwardY.value = fwd.y; listener.forwardZ.value = fwd.z;
       listener.upX.value = up.x; listener.upY.value = up.y; listener.upZ.value = up.z;
     } catch {
-      try { (listener as unknown as { setPosition: Function; setOrientation: Function }).setPosition(pos.x, pos.y, pos.z); (listener as unknown as { setPosition: Function; setOrientation: Function }).setOrientation(fwd.x, fwd.y, fwd.z, up.x, up.y, up.z); } catch {}
+      try {
+        const legacy = listener as unknown as { setPosition(x:number,y:number,z:number):void; setOrientation(x:number,y:number,z:number, ux:number,uy:number,uz:number):void };
+        legacy.setPosition(pos.x,pos.y,pos.z);
+        legacy.setOrientation(fwd.x,fwd.y,fwd.z, up.x,up.y,up.z);
+      } catch {}
     }
   });
   return null;
@@ -316,12 +319,12 @@ export function CinemaScene({ videoEl, enabled = true, mainVideoEl, localVideoEl
   const hemiRef = useRef<THREE.HemisphereLight>(null!);
   const vivid = useMemo(() => {
     const base = new THREE.Color(avg[0], avg[1], avg[2]);
-    const hsl = { h: 0, s: 0, l: 0 } as THREE.HSL;
+    const hsl: THREE.HSL = { h:0, s:0, l:0 } as THREE.HSL;
     base.getHSL(hsl);
     hsl.s = Math.min(1, hsl.s * 1.7 + 0.05);
     hsl.l = Math.min(0.62, hsl.l * 1.05 + 0.015);
     return new THREE.Color().setHSL(hsl.h, hsl.s, hsl.l);
-  }, [avg[0], avg[1], avg[2]]);
+  }, [avg]);
   const bg = useMemo(() => vivid.clone().multiplyScalar(0.20), [vivid]);
   useEffect(() => {
     if (ambientRef.current) ambientRef.current.color.lerp(vivid, 0.5);
@@ -401,8 +404,8 @@ export function CinemaScene({ videoEl, enabled = true, mainVideoEl, localVideoEl
         {/* Emissive ceiling panel raised with ceiling */}
         <mesh position={[0,5.77,-1]} rotation={[Math.PI/2,0,0]}> <planeGeometry args={[14,14]} /> <meshBasicMaterial color={vivid.clone().multiplyScalar(0.4)} transparent opacity={0.33} /> </mesh>
         <MainScreen videoEl={primary} showPlayOverlay={showPlayOverlay} onPlayClick={onPlayClick} />
-        <VideoPanel videoEl={localVideoEl || null} position={[-2.1, 4.3, -4]} rotation={[0, 0, 0]} label="Moi" />
-        <VideoPanel videoEl={remoteVideoEl || null} position={[2.1, 4.3, -4]} rotation={[0, 0, 0]} label="Remote" />
+        <VideoPanel videoEl={localVideoEl || null} position={[-2.1, 4.3, -4]} rotation={[0, 0, 0]} />
+        <VideoPanel videoEl={remoteVideoEl || null} position={[2.1, 4.3, -4]} rotation={[0, 0, 0]} />
         <Seats />
         <RoomDeco />
         <CameraRig />
