@@ -1,0 +1,33 @@
+version: '3.9'
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: duo-backend:latest
+    environment:
+      CINEMA_SESSIONS_ROOT: /tmp/cinema_sessions
+      PYTHONUNBUFFERED: '1'
+    volumes:
+      - cinema_data:/tmp/cinema_sessions
+    ports:
+      - "8001:8001"
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    image: duo-web:latest
+    environment:
+      NEXT_PUBLIC_BACKEND_WS: ws://backend:8001/ws
+      NEXT_PUBLIC_BACKEND_HTTP: http://backend:8001
+      NODE_ENV: production
+    depends_on:
+      - backend
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+volumes:
+  cinema_data:
