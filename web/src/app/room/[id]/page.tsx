@@ -8,6 +8,29 @@ import { useParams } from "next/navigation";
 import { CinemaScene } from "../../../components/CinemaScene";
 import Hls from "hls.js";
 
+/* Temporary minimal YT type to satisfy TS */
+// eslint-disable-next-line @typescript-eslint/no-namespace
+declare namespace YT {
+  interface Player {
+    getCurrentTime(): number;
+    getDuration(): number;
+    getPlaybackRate(): number;
+    setPlaybackRate(r: number): void;
+    loadVideoById(id: string, startSeconds?: number): void;
+    playVideo(): void;
+    pauseVideo(): void;
+    seekTo(seconds: number, allowSeekAhead: boolean): void;
+    setSize(width: number, height: number): void;
+  }
+  // eslint-disable-next-line @typescript-eslint/no-namespace
+  namespace PlayerState {
+    const PLAYING: number;
+    const PAUSED: number;
+    const BUFFERING: number;
+    const CUED: number;
+  }
+}
+
 /* ============================ Types ============================ */
 type YTAction =
   | { action: "load"; videoId: string }
@@ -27,8 +50,6 @@ type Msg =
 declare global { interface Window { YT: any; onYouTubeIframeAPIReady: () => void; } }
 
 /* ============================ Utils ============================ */
-const fmtTime = (t: number) => !isFinite(t) ? "0:00" : `${Math.floor(t/60)}:${Math.floor(t%60).toString().padStart(2,'0')}`;
-// Helper to extract YouTube ID from full URL or raw id
 const parseYouTubeId = (raw: string): string | null => {
   if (!raw) return null;
   const trimmed = raw.trim();
@@ -133,7 +154,7 @@ export default function Room() {
 
   /* -------- YouTube sync -------- */
   const youtubeContainerRef = useRef<HTMLDivElement | null>(null);
-  const ytPlayerRef = useRef<any>(null);
+  const ytPlayerRef = useRef<YT.Player | null>(null);
   const ytReadyRef = useRef(false);
   const lastSentRef = useRef<{ action?: string; t?: number }>({});
   const primeFrameRef = useRef(false);
@@ -227,7 +248,7 @@ export default function Room() {
   const [cinemaPaused, setCinemaPaused] = useState(false);
   const [cinemaUserStarted, setCinemaUserStarted] = useState(false);
   const cinemaUserStartedRef = useRef(false);
-  const hlsRef = useRef<any>(null);
+  const hlsRef = useRef<Hls | null>(null);
   const pendingCinemaCmdRef = useRef<{ action: 'play' | 'pause'; t: number } | null>(null);
   // Sync helpers
   const suppressBroadcastRef = useRef(false);

@@ -16,6 +16,9 @@ interface CinemaProps {
   ambientEnabled?: boolean; // NEW
 }
 
+// Internal helper types
+interface SpatializedVideo extends HTMLVideoElement { _spatialized?: boolean }
+
 // Reusable hook to build a video texture when ready
 function useVideoTexture(videoEl: HTMLVideoElement | null) {
   const readyRef = useRef(false);
@@ -79,7 +82,7 @@ function VideoPanel({ videoEl, position, rotation, label }: { videoEl: HTMLVideo
         <planeGeometry args={[1.3, 0.18]} />
         <meshBasicMaterial color="#000" />
       </mesh>
-      {/* Simple text sprite replacement (could add Text from drei if installed) */}
+      {/* Simple text sprite replacement */}
     </group>
   );
 }
@@ -106,17 +109,14 @@ function Seats() {
 function RoomDeco() {
   return (
     <group>
-      {/* Floor unchanged */}
       <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
         <planeGeometry args={[20, 20]} />
         <meshStandardMaterial color="#111" />
       </mesh>
-      {/* Back wall behind raised screen */}
       <mesh position={[0, 2.2, -4.05]}> {/* was y=1.5 */}
         <planeGeometry args={[6.8, 3.9]} />
         <meshStandardMaterial color="#050505" />
       </mesh>
-      {/* Ceiling raised */}
       <mesh position={[0, 5.8, -1]} rotation={[Math.PI / 2, 0, 0]}>
         <planeGeometry args={[20, 20]} />
         <meshStandardMaterial color="#0d0d0d" />
@@ -126,7 +126,6 @@ function RoomDeco() {
 }
 
 function CameraRig() {
-  // Slight floating effect
   const ref = useRef<THREE.Group>(null!);
   useFrame((state) => {
     const t = state.clock.getElapsedTime();
@@ -138,14 +137,13 @@ function CameraRig() {
 function CameraMover({ primaryVideo, onPlayPauseHotkey }: { primaryVideo?: HTMLVideoElement | null; onPlayPauseHotkey?: () => void }) {
   const { camera, gl } = useThree();
   const keys = useRef<Record<string, boolean>>({});
-  const speedRef = useRef(3.2); // m/s
+  const speedRef = useRef(3.2);
   const [locked, setLocked] = useState(false);
   const yawRef = useRef(0);
   const pitchRef = useRef(0);
-  const sensitivity = 0.002; // mouse sensitivity
+  const sensitivity = 0.002;
 
   useEffect(() => {
-    // init yaw/pitch from current camera
     yawRef.current = camera.rotation.y;
     pitchRef.current = camera.rotation.x;
 
@@ -204,7 +202,7 @@ function CameraMover({ primaryVideo, onPlayPauseHotkey }: { primaryVideo?: HTMLV
       window.removeEventListener('mousemove', onMouseMove);
       gl.domElement.removeEventListener('click', request);
     };
-  }, [gl, locked, camera]);
+  }, [gl, locked, camera, onPlayPauseHotkey, primaryVideo]);
 
   useFrame((_, dt) => {
     if (!locked) return; // Only move when pointer locked
@@ -303,20 +301,19 @@ function SpatialAudioUpdater({ ctxRef }: { ctxRef: React.MutableRefObject<AudioC
       listener.forwardX.value = fwd.x; listener.forwardY.value = fwd.y; listener.forwardZ.value = fwd.z;
       listener.upX.value = up.x; listener.upY.value = up.y; listener.upZ.value = up.z;
     } catch {
-      try { (listener as any).setPosition(pos.x, pos.y, pos.z); (listener as any).setOrientation(fwd.x, fwd.y, fwd.z, up.x, up.y, up.z); } catch {}
+      try { (listener as unknown as { setPosition: Function; setOrientation: Function }).setPosition(pos.x, pos.y, pos.z); (listener as unknown as { setPosition: Function; setOrientation: Function }).setOrientation(fwd.x, fwd.y, fwd.z, up.x, up.y, up.z); } catch {}
     }
   });
   return null;
 }
 
 export function CinemaScene({ videoEl, enabled = true, mainVideoEl, localVideoEl, remoteVideoEl, showPlayOverlay, onPlayClick, onPlayPauseHotkey, ambientEnabled = true }: CinemaProps) {
-  if (!enabled) return null;
-  const primary = mainVideoEl !== undefined ? mainVideoEl : videoEl; // fallback
+  // HOOKS MUST RUN UNCONDITIONALLY
+  const primary = mainVideoEl !== undefined ? mainVideoEl : videoEl;
   const avg = useAmbientVideoLight(primary || null, ambientEnabled, 9);
   const ambientRef = useRef<THREE.AmbientLight>(null!);
   const dirRef = useRef<THREE.DirectionalLight>(null!);
-  const hemiRef = useRef<THREE.HemisphereLight>(null!); // NEW ceiling ambience
-  // NEW vivid color derivation (boost saturation & controlled lightness)
+  const hemiRef = useRef<THREE.HemisphereLight>(null!);
   const vivid = useMemo(() => {
     const base = new THREE.Color(avg[0], avg[1], avg[2]);
     const hsl = { h: 0, s: 0, l: 0 } as THREE.HSL;
@@ -340,14 +337,16 @@ export function CinemaScene({ videoEl, enabled = true, mainVideoEl, localVideoEl
     }
   }, [vivid]);
 
-  /* -------- Spatial Audio (screen audio from main screen) -------- */
   const spatialCtxRef = useRef<AudioContext | null>(null);
   const screenPannerRef = useRef<PannerNode | null>(null);
   const screenGainRef = useRef<GainNode | null>(null);
   useEffect(() => {
-    const vid = primary; if (!vid) return;
+    const vid = primary as SpatializedVideo | null; if (!vid) return;
     if (!spatialCtxRef.current) {
-      try { spatialCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)(); } catch { return; }
+      try {
+        const AC: typeof AudioContext = (window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext)!;
+        spatialCtxRef.current = new AC();
+      } catch { return; }
       const resume = () => { spatialCtxRef.current?.resume?.(); window.removeEventListener('pointerdown', resume); window.removeEventListener('keydown', resume); document.removeEventListener('visibilitychange', onVis); };
       const onVis = () => { if (document.visibilityState === 'visible') spatialCtxRef.current?.resume?.(); };
       window.addEventListener('pointerdown', resume, { once: true });
@@ -355,7 +354,7 @@ export function CinemaScene({ videoEl, enabled = true, mainVideoEl, localVideoEl
       document.addEventListener('visibilitychange', onVis);
     }
     const ctx = spatialCtxRef.current!;
-    if ((vid as any)._spatialized) {
+    if (vid._spatialized) {
       if (screenPannerRef.current) {
         screenPannerRef.current.positionX.value = 0;
         screenPannerRef.current.positionY.value = 2.2;
@@ -366,7 +365,7 @@ export function CinemaScene({ videoEl, enabled = true, mainVideoEl, localVideoEl
     }
     try {
       const source = ctx.createMediaElementSource(vid);
-      (vid as any)._spatialized = true;
+      vid._spatialized = true;
       const panner = ctx.createPanner();
       panner.panningModel = 'HRTF';
       panner.distanceModel = 'inverse';
@@ -376,23 +375,22 @@ export function CinemaScene({ videoEl, enabled = true, mainVideoEl, localVideoEl
       panner.coneInnerAngle = 360; panner.coneOuterAngle = 0; panner.coneOuterGain = 0;
       panner.positionX.value = 0; panner.positionY.value = 2.2; panner.positionZ.value = -4.05;
       const gain = ctx.createGain();
-      gain.gain.value = 1; // ensure audible
+      gain.gain.value = 1;
       source.connect(panner); panner.connect(gain); gain.connect(ctx.destination);
       screenPannerRef.current = panner; screenGainRef.current = gain;
-      // Important: DO NOT also set volume=0, that can silence some browser pipelines.
-      // Keep element muted to avoid double (non‑spatial) playback; if still silent, comment next line.
-      vid.muted = true; // remove this line if silence persists.
+      vid.muted = true;
       if (ctx.state === 'suspended') ctx.resume().catch(()=>{});
     } catch {
-      // Fallback: unmute direct element if spatial path fails
       try { vid.muted = false; } catch {}
     }
   }, [primary]);
   useEffect(() => () => { try { spatialCtxRef.current?.close(); } catch {}; spatialCtxRef.current=null; screenPannerRef.current=null; screenGainRef.current=null; }, []);
 
+  if (!enabled) return null;
+
   return (
     <div className="absolute inset-0 pointer-events-auto select-none" style={{ zIndex: 5 }}>
-      <Canvas shadows camera={{ position: [0, 1.8, 4.8], fov: 60 }}> {/* camera slightly higher */}
+      <Canvas shadows camera={{ position: [0, 1.8, 4.8], fov: 60 }}>
         <color attach="background" args={[bg]} />
         <fog attach="fog" args={[bg.getStyle(), 5, 22]} />
         <ambientLight ref={ambientRef} intensity={0.75} color={vivid} />
