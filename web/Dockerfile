@@ -6,17 +6,34 @@ RUN corepack enable && pnpm install --frozen-lockfile
 
 FROM node:20-alpine AS build
 WORKDIR /app
-ENV NODE_ENV=production
+
+# Build args (can be overridden at build time)
+ARG NEXT_PUBLIC_BACKEND_WS=wss://duo.niico.fr/ws
+ARG NEXT_PUBLIC_BACKEND_HTTP=https://duo.niico.fr
+# Cache‑busting arg (supply a changing value: commit SHA, timestamp, etc.)
+ARG BUILD_ID=dev
+
+ENV NODE_ENV=production \
+    NEXT_PUBLIC_BACKEND_WS=${NEXT_PUBLIC_BACKEND_WS} \
+    NEXT_PUBLIC_BACKEND_HTTP=${NEXT_PUBLIC_BACKEND_HTTP} \
+    BUILD_ID=${BUILD_ID}
+
 COPY --from=deps /app/node_modules ./node_modules
 COPY web ./
-RUN corepack enable && pnpm build
+
+# Optional: echo build info
+RUN echo "Building with WS=${NEXT_PUBLIC_BACKEND_WS} HTTP=${NEXT_PUBLIC_BACKEND_HTTP} BUILD_ID=${BUILD_ID}" && \
+    corepack enable && pnpm build
 
 FROM node:20-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production \
     PORT=3000
+# Re-expose the same public env (runtime access for edge/server code)
+ENV NEXT_PUBLIC_BACKEND_WS=${NEXT_PUBLIC_BACKEND_WS} \
+    NEXT_PUBLIC_BACKEND_HTTP=${NEXT_PUBLIC_BACKEND_HTTP} \
+    BUILD_ID=${BUILD_ID}
 
-# Only copy necessary build artifacts
 COPY --from=build /app/.next ./.next
 COPY --from=build /app/public ./public
 COPY --from=build /app/package.json ./package.json
