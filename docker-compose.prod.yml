@@ -10,8 +10,8 @@ services:
       PYTHONUNBUFFERED: '1'
     volumes:
       - cinema_data:/tmp/cinema_sessions
-    ports:
-      - "8001:8001"
+    expose:
+      - "8001"
     restart: unless-stopped
 
   web:
@@ -25,8 +25,8 @@ services:
       NODE_ENV: production
     depends_on:
       - backend
-    ports:
-      - "3000:3000"
+    expose:
+      - "3000"
     restart: unless-stopped
 
 volumes:
