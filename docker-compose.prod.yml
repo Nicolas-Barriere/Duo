@@ -1,4 +1,3 @@
-version: '3.9'
 services:
   backend:
     build:
@@ -20,8 +19,9 @@ services:
       dockerfile: web/Dockerfile
     image: duo-web:latest
     environment:
-      NEXT_PUBLIC_BACKEND_WS: ws://backend:8001/ws
-      NEXT_PUBLIC_BACKEND_HTTP: http://backend:8001
+      # Use your public domain (adjust protocol if behind TLS terminator)
+      NEXT_PUBLIC_BACKEND_WS: wss://duo.niico.fr/ws
+      NEXT_PUBLIC_BACKEND_HTTP: https://duo.niico.fr
       NODE_ENV: production
     depends_on:
       - backend
