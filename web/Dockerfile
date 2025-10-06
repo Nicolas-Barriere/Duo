@@ -8,8 +8,8 @@ FROM node:20-alpine AS build
 WORKDIR /app
 
 # Build args (can be overridden at build time)
-ARG NEXT_PUBLIC_BACKEND_WS=wss://duo.niico.fr/ws
-ARG NEXT_PUBLIC_BACKEND_HTTP=https://duo.niico.fr
+ARG NEXT_PUBLIC_BACKEND_WS=wss://api.duo.niico.fr/ws
+ARG NEXT_PUBLIC_BACKEND_HTTP=https://api.duo.niico.fr
 # Cache‑busting arg (supply a changing value: commit SHA, timestamp, etc.)
 ARG BUILD_ID=dev
 
